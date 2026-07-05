@@ -45,6 +45,8 @@ All without the LLM ever needing direct access to WinDbg, a terminal, or the VM 
 | [frida-tools](https://frida.re/) *(optional)* | User-mode instrumentation |
 | [WinDbg Preview](https://aka.ms/windbg) *(optional)* | Provides dbgsrv.exe for remote user-mode debugging |
 
+> **New machine?** Run `pwsh -File scripts/setup.ps1` to build the server and auto-install/stage everything that can be automated (NuGet restore, frida-tools, a version-matched frida-server for the guest), plus a health check for VMware/WDK. Use `-CheckOnly` to diagnose without changing anything. See **[SETUP.md](SETUP.md)** for the full dependency breakdown — what's bundled vs. what you must provide.
+
 ### 1. Clone & Build
 
 ```bash

@@ -39,3 +39,6 @@ src/WinDbgMCP.Server/appsettings.json
 
 # Frida temp scripts
 frida_script_*.js
+
+# Staged guest-side binaries downloaded by scripts/setup.ps1
+guest-tools/
