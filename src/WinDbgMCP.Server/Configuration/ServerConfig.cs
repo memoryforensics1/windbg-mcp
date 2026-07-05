@@ -17,6 +17,27 @@ public sealed class VmConfig
 {
     public string VmxPath { get; set; } = string.Empty;
     public string VmrunPath { get; set; } = @"C:\Program Files (x86)\VMware\VMware Workstation\vmrun.exe";
+
+    /// <summary>
+    /// vmrun host type (-T flag): "ws" (local Workstation, default), "esx" (ESXi),
+    /// "vc" (vCenter), "ws-shared" (shared Workstation), "fusion", "player".
+    /// </summary>
+    public string HostType { get; set; } = "ws";
+
+    /// <summary>
+    /// Remote hypervisor URL (-h flag), e.g. "https://esxi-host/sdk".
+    /// Leave empty for local Workstation. For esx/vc, VmxPath must be a
+    /// datastore path like "[datastore1] win10/win10.vmx".
+    /// </summary>
+    public string HostUrl { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Hypervisor login (-u / -p flags). Required when HostUrl is set.
+    /// Note: vmrun only accepts these on the command line, so the password
+    /// is visible in the local process list while a vmrun command runs.
+    /// </summary>
+    public string HostUsername { get; set; } = string.Empty;
+    public string HostPassword { get; set; } = string.Empty;
     /// <summary>
     /// VM encryption password (for encrypted VMs). Used as -vp flag in vmrun.
     /// </summary>

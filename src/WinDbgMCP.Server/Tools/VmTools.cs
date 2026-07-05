@@ -209,15 +209,21 @@ public static class VmTools
         "Switch the active VM target at runtime. " +
         "All VM, guest, and snapshot operations will target the new VM after this call. " +
         "If the kernel debugger is connected, it is cleanly disconnected first. " +
+        "Supports remote hypervisors: pass hostType/hostUrl/host credentials to target " +
+        "a VM on ESXi, vCenter, or shared Workstation instead of the local machine. " +
         "Note: kd_connect uses its own connection string — this only affects guest/VM operations.")]
     public static async Task<string> VmSetTarget(
         StateCoordinator state,
         VmwareManager vmware,
         DbgEngManager dbgEng,
-        [Description("Absolute path to the .vmx file of the target VM")] string vmxPath,
+        [Description("Path to the .vmx file. For esx/vc hosts use a datastore path like \"[datastore1] win10/win10.vmx\"")] string vmxPath,
         [Description("Guest OS username")] string guestUsername,
         [Description("Guest OS password")] string guestPassword,
         [Description("VM encryption password (leave empty if VM is not encrypted)")] string vmPassword = "",
+        [Description("Hypervisor type: ws (local Workstation), esx, vc, ws-shared, fusion, player. Omit to keep current.")] string? hostType = null,
+        [Description("Remote hypervisor URL, e.g. https://esxi-host/sdk. Pass empty string to switch back to local. Omit to keep current.")] string? hostUrl = null,
+        [Description("Hypervisor login username (required when hostUrl is set). Omit to keep current.")] string? hostUsername = null,
+        [Description("Hypervisor login password. Omit to keep current.")] string? hostPassword = null,
         CancellationToken ct = default)
     {
         var precheck = await state.ValidatePreconditionsAsync("vm_set_target");
@@ -233,7 +239,15 @@ public static class VmTools
         }
 
         // Switch the target
-        vmware.UpdateTarget(vmxPath, guestUsername, guestPassword, vmPassword);
+        try
+        {
+            vmware.UpdateTarget(vmxPath, guestUsername, guestPassword, vmPassword,
+                hostType, hostUrl, hostUsername, hostPassword);
+        }
+        catch (InvalidOperationException ex)
+        {
+            return $"vm_set_target failed: {ex.Message}";
+        }
 
         // Reset all state — power state of the new VM is unknown until we check
         var powerState = await vmware.GetPowerStateAsync(ct);

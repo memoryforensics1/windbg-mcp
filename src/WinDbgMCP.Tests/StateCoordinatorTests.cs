@@ -470,12 +470,13 @@ public class StateCoordinatorTests : IDisposable
     }
 
     [Fact]
-    public async Task UmdFrida_FailsWhenNotAttached()
+    public async Task UmdFrida_AllowedWithoutAttach()
     {
+        // umd_frida only requires guest ops, not an attached session:
+        // action="list" is documented to work without attaching, and each
+        // eval/inject spawns a fresh frida process anyway.
         SetVmRunning();
-        var result = await _coordinator.ValidatePreconditionsAsync("umd_frida");
-        Assert.NotNull(result);
-        Assert.Contains("umd_frida_attach", result!.Message);
+        Assert.Null(await _coordinator.ValidatePreconditionsAsync("umd_frida"));
     }
 
     [Fact]
