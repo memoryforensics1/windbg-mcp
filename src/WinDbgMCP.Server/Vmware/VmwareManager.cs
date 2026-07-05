@@ -20,6 +20,11 @@ public sealed class VmwareManager
     private string _vmPassword;
     private string _guestUser;
     private string _guestPass;
+    private string _hostType;
+    private string _hostUrl;
+    private string _hostUser;
+    private string _hostPass;
+    private string _hostArgs;
     private readonly TimeoutConfig _timeouts;
     private readonly SecurityConfig _security;
     private readonly ILogger<VmwareManager> _logger;
@@ -30,6 +35,9 @@ public sealed class VmwareManager
 
     public string VmxPath => _vmxPath;
     public string GuestUser => _guestUser;
+    public string HostType => _hostType;
+    public string HostUrl => _hostUrl;
+    public bool IsRemoteHost => !string.IsNullOrEmpty(_hostUrl);
 
     public VmwareManager(ServerConfig config, ILogger<VmwareManager> logger)
     {
@@ -38,11 +46,17 @@ public sealed class VmwareManager
         _vmPassword = config.Vm.VmPassword;
         _guestUser = config.Vm.GuestUsername;
         _guestPass = config.Vm.GuestPassword;
+        _hostType = string.IsNullOrWhiteSpace(config.Vm.HostType) ? "ws" : config.Vm.HostType.Trim();
+        _hostUrl = config.Vm.HostUrl;
+        _hostUser = config.Vm.HostUsername;
+        _hostPass = config.Vm.HostPassword;
         _timeouts = config.Timeouts;
         _security = config.Security;
         _logger = logger;
+        _hostArgs = BuildHostArgs();
 
-        // Validate vmrun exists at startup
+        // Validate vmrun exists at startup (vmrun always runs locally,
+        // even when it targets a remote hypervisor)
         if (!File.Exists(_vmrunPath))
         {
             throw new FileNotFoundException(
@@ -55,14 +69,65 @@ public sealed class VmwareManager
     /// <summary>
     /// Switch the active VM target at runtime.
     /// All subsequent VM and guest operations will target the new VM.
+    /// Host parameters are optional — pass null to keep the current hypervisor.
     /// </summary>
-    public void UpdateTarget(string vmxPath, string guestUser, string guestPass, string vmPassword = "")
+    public void UpdateTarget(string vmxPath, string guestUser, string guestPass, string vmPassword = "",
+        string? hostType = null, string? hostUrl = null, string? hostUser = null, string? hostPass = null)
     {
+        var newHostType = hostType == null ? _hostType
+            : string.IsNullOrWhiteSpace(hostType) ? "ws" : hostType.Trim();
+        var newHostUrl = hostUrl ?? _hostUrl;
+        var newHostUser = hostUser ?? _hostUser;
+        var newHostPass = hostPass ?? _hostPass;
+
+        // Validate before mutating so a bad host config leaves the old target intact
+        var newHostArgs = BuildHostArgs(newHostType, newHostUrl, newHostUser, newHostPass);
+
         _vmxPath = vmxPath;
         _guestUser = guestUser;
         _guestPass = guestPass;
         _vmPassword = vmPassword;
-        _logger.LogInformation("VM target updated: {VmxPath} (user: {User})", vmxPath, guestUser);
+        _hostType = newHostType;
+        _hostUrl = newHostUrl;
+        _hostUser = newHostUser;
+        _hostPass = newHostPass;
+        _hostArgs = newHostArgs;
+        _logger.LogInformation("VM target updated: {VmxPath} (user: {User}, host: {HostType} {HostUrl})",
+            vmxPath, guestUser, _hostType, string.IsNullOrEmpty(_hostUrl) ? "local" : _hostUrl);
+    }
+
+    private string BuildHostArgs() => BuildHostArgs(_hostType, _hostUrl, _hostUser, _hostPass);
+
+    /// <summary>
+    /// Common vmrun authentication prefix: host type plus remote hypervisor
+    /// URL/credentials when configured.
+    /// </summary>
+    private static string BuildHostArgs(string hostType, string hostUrl, string hostUser, string hostPass)
+    {
+        var requiresUrl = hostType.Equals("esx", StringComparison.OrdinalIgnoreCase)
+                       || hostType.Equals("vc", StringComparison.OrdinalIgnoreCase)
+                       || hostType.Equals("ws-shared", StringComparison.OrdinalIgnoreCase);
+
+        if (string.IsNullOrEmpty(hostUrl))
+        {
+            if (requiresUrl)
+                throw new InvalidOperationException(
+                    $"Vm.HostType is '{hostType}' but Vm.HostUrl is empty. " +
+                    "Remote host types require a URL like https://esxi-host/sdk.");
+            return $"-T {hostType}";
+        }
+
+        if (!requiresUrl)
+            throw new InvalidOperationException(
+                $"Vm.HostUrl is set but Vm.HostType is '{hostType}', which is a local host type. " +
+                "Use HostType esx (ESXi), vc (vCenter), or ws-shared for remote hypervisors.");
+
+        if (string.IsNullOrEmpty(hostUser))
+            throw new InvalidOperationException(
+                "Vm.HostUrl is set but Vm.HostUsername is empty. " +
+                "Remote hypervisor connections require host credentials.");
+
+        return $"-T {hostType} -h \"{hostUrl}\" -u \"{hostUser}\" -p \"{hostPass}\"";
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -71,9 +136,12 @@ public sealed class VmwareManager
 
     public async Task<VmResult> StartAsync(bool headless = true, CancellationToken ct = default)
     {
-        var guiArg = headless ? "nogui" : "gui";
+        // ESXi/vCenter reject the gui/nogui argument — there is no host GUI
+        var isServerHost = _hostType.Equals("esx", StringComparison.OrdinalIgnoreCase)
+                        || _hostType.Equals("vc", StringComparison.OrdinalIgnoreCase);
+        var guiArg = isServerHost ? "" : (headless ? "nogui" : "gui");
         var result = await RunVmrunAsync(
-            $"-T ws start \"{_vmxPath}\" {guiArg}",
+            $"{_hostArgs} start \"{_vmxPath}\" {guiArg}",
             TimeSpan.FromSeconds(_timeouts.VmStartSeconds), ct);
 
         if (result.Success)
@@ -88,7 +156,7 @@ public sealed class VmwareManager
     {
         var mode = hard ? "hard" : "soft";
         var result = await RunVmrunAsync(
-            $"-T ws stop \"{_vmxPath}\" {mode}",
+            $"{_hostArgs} stop \"{_vmxPath}\" {mode}",
             TimeSpan.FromSeconds(_timeouts.VmStopSeconds), ct);
 
         if (result.Success)
@@ -102,7 +170,7 @@ public sealed class VmwareManager
     public async Task<VmResult> PauseAsync(CancellationToken ct = default)
     {
         var result = await RunVmrunAsync(
-            $"-T ws pause \"{_vmxPath}\"",
+            $"{_hostArgs} pause \"{_vmxPath}\"",
             TimeSpan.FromSeconds(_timeouts.VmPauseResumeSeconds), ct);
 
         if (result.Success)
@@ -114,7 +182,7 @@ public sealed class VmwareManager
     public async Task<VmResult> UnpauseAsync(CancellationToken ct = default)
     {
         var result = await RunVmrunAsync(
-            $"-T ws unpause \"{_vmxPath}\"",
+            $"{_hostArgs} unpause \"{_vmxPath}\"",
             TimeSpan.FromSeconds(_timeouts.VmPauseResumeSeconds), ct);
 
         if (result.Success)
@@ -127,7 +195,7 @@ public sealed class VmwareManager
     {
         var mode = hard ? "hard" : "soft";
         var result = await RunVmrunAsync(
-            $"-T ws reset \"{_vmxPath}\" {mode}",
+            $"{_hostArgs} reset \"{_vmxPath}\" {mode}",
             TimeSpan.FromSeconds(_timeouts.VmStartSeconds), ct);
 
         if (result.Success)
@@ -143,7 +211,7 @@ public sealed class VmwareManager
     public async Task<VmResult> SnapshotCreateAsync(string name, CancellationToken ct = default)
     {
         var result = await RunVmrunAsync(
-            $"-T ws snapshot \"{_vmxPath}\" \"{name}\"",
+            $"{_hostArgs} snapshot \"{_vmxPath}\" \"{name}\"",
             TimeSpan.FromSeconds(_timeouts.VmSnapshotCreateSeconds), ct);
 
         if (result.Success)
@@ -155,7 +223,7 @@ public sealed class VmwareManager
     public async Task<VmResult> SnapshotRestoreAsync(string name, CancellationToken ct = default)
     {
         var result = await RunVmrunAsync(
-            $"-T ws revertToSnapshot \"{_vmxPath}\" \"{name}\"",
+            $"{_hostArgs} revertToSnapshot \"{_vmxPath}\" \"{name}\"",
             TimeSpan.FromSeconds(_timeouts.VmSnapshotRestoreSeconds), ct);
 
         if (result.Success)
@@ -188,7 +256,7 @@ public sealed class VmwareManager
         }
 
         var result = await RunVmrunAsync(
-            $"-T ws deleteSnapshot \"{_vmxPath}\" \"{name}\"",
+            $"{_hostArgs} deleteSnapshot \"{_vmxPath}\" \"{name}\"",
             TimeSpan.FromSeconds(_timeouts.VmSnapshotRestoreSeconds), ct);
 
         if (result.Success)
@@ -200,7 +268,7 @@ public sealed class VmwareManager
     public async Task<SnapshotListResult> SnapshotListAsync(CancellationToken ct = default)
     {
         var result = await RunVmrunAsync(
-            $"-T ws listSnapshots \"{_vmxPath}\"",
+            $"{_hostArgs} listSnapshots \"{_vmxPath}\"",
             TimeSpan.FromSeconds(_timeouts.VmToolsCheckSeconds), ct);
 
         if (!result.Success)
@@ -230,7 +298,7 @@ public sealed class VmwareManager
         {
             // vmrun list returns all running VMs
             var result = await RunVmrunAsync(
-                "-T ws list",
+                $"{_hostArgs} list",
                 TimeSpan.FromSeconds(_timeouts.VmToolsCheckSeconds), ct);
 
             if (!result.Success)
@@ -265,7 +333,7 @@ public sealed class VmwareManager
         try
         {
             var result = await RunVmrunAsync(
-                $"-T ws checkToolsState \"{_vmxPath}\"",
+                $"{_hostArgs} checkToolsState \"{_vmxPath}\"",
                 timeout.Value, ct);
             return result.Stdout.Trim().Equals("running", StringComparison.OrdinalIgnoreCase);
         }
@@ -280,7 +348,7 @@ public sealed class VmwareManager
         try
         {
             var result = await RunVmrunAsync(
-                $"-T ws getGuestIPAddress \"{_vmxPath}\"",
+                $"{_hostArgs} getGuestIPAddress \"{_vmxPath}\"",
                 TimeSpan.FromSeconds(_timeouts.VmGetIpSeconds), ct);
 
             if (result.Success)
@@ -307,7 +375,7 @@ public sealed class VmwareManager
             Directory.CreateDirectory(dir);
 
         var result = await RunVmrunAsync(
-            $"-T ws -gu \"{_guestUser}\" -gp \"{_guestPass}\" captureScreen \"{_vmxPath}\" \"{outputPath}\"",
+            $"{_hostArgs} -gu \"{_guestUser}\" -gp \"{_guestPass}\" captureScreen \"{_vmxPath}\" \"{outputPath}\"",
             TimeSpan.FromSeconds(_timeouts.VmScreenshotSeconds), ct);
 
         if (result.Success)
@@ -327,7 +395,7 @@ public sealed class VmwareManager
         timeout ??= TimeSpan.FromSeconds(_timeouts.GuestCommandSeconds);
         var interactiveArg = interactive ? "-interactive " : "";
         return await RunVmrunAsync(
-            $"-T ws -gu \"{_guestUser}\" -gp \"{_guestPass}\" " +
+            $"{_hostArgs} -gu \"{_guestUser}\" -gp \"{_guestPass}\" " +
             $"runProgramInGuest \"{_vmxPath}\" {interactiveArg}\"{program}\" {arguments}",
             timeout.Value, ct);
     }
@@ -338,7 +406,7 @@ public sealed class VmwareManager
     {
         timeout ??= TimeSpan.FromSeconds(_timeouts.GuestCommandSeconds);
         return await RunVmrunAsync(
-            $"-T ws -gu \"{_guestUser}\" -gp \"{_guestPass}\" " +
+            $"{_hostArgs} -gu \"{_guestUser}\" -gp \"{_guestPass}\" " +
             $"runScriptInGuest \"{_vmxPath}\" \"{interpreter}\" \"{scriptText}\"",
             timeout.Value, ct);
     }
@@ -347,7 +415,7 @@ public sealed class VmwareManager
         string hostPath, string guestPath, CancellationToken ct = default)
     {
         return await RunVmrunAsync(
-            $"-T ws -gu \"{_guestUser}\" -gp \"{_guestPass}\" " +
+            $"{_hostArgs} -gu \"{_guestUser}\" -gp \"{_guestPass}\" " +
             $"copyFileFromHostToGuest \"{_vmxPath}\" \"{hostPath}\" \"{guestPath}\"",
             TimeSpan.FromSeconds(_timeouts.GuestFileTransferSeconds), ct);
     }
@@ -356,7 +424,7 @@ public sealed class VmwareManager
         string guestPath, string hostPath, CancellationToken ct = default)
     {
         return await RunVmrunAsync(
-            $"-T ws -gu \"{_guestUser}\" -gp \"{_guestPass}\" " +
+            $"{_hostArgs} -gu \"{_guestUser}\" -gp \"{_guestPass}\" " +
             $"copyFileFromGuestToHost \"{_vmxPath}\" \"{guestPath}\" \"{hostPath}\"",
             TimeSpan.FromSeconds(_timeouts.GuestFileTransferSeconds), ct);
     }
@@ -364,7 +432,7 @@ public sealed class VmwareManager
     public async Task<ProcessResult> ListProcessesInGuestAsync(CancellationToken ct = default)
     {
         return await RunVmrunAsync(
-            $"-T ws -gu \"{_guestUser}\" -gp \"{_guestPass}\" " +
+            $"{_hostArgs} -gu \"{_guestUser}\" -gp \"{_guestPass}\" " +
             $"listProcessesInGuest \"{_vmxPath}\"",
             TimeSpan.FromSeconds(_timeouts.GuestListProcessesSeconds), ct);
     }
@@ -372,7 +440,7 @@ public sealed class VmwareManager
     public async Task<ProcessResult> KillProcessInGuestAsync(uint pid, CancellationToken ct = default)
     {
         return await RunVmrunAsync(
-            $"-T ws -gu \"{_guestUser}\" -gp \"{_guestPass}\" " +
+            $"{_hostArgs} -gu \"{_guestUser}\" -gp \"{_guestPass}\" " +
             $"killProcessInGuest \"{_vmxPath}\" {pid}",
             TimeSpan.FromSeconds(_timeouts.GuestKillProcessSeconds), ct);
     }
@@ -380,7 +448,7 @@ public sealed class VmwareManager
     public async Task<ProcessResult> FileExistsInGuestAsync(string guestPath, CancellationToken ct = default)
     {
         return await RunVmrunAsync(
-            $"-T ws -gu \"{_guestUser}\" -gp \"{_guestPass}\" " +
+            $"{_hostArgs} -gu \"{_guestUser}\" -gp \"{_guestPass}\" " +
             $"fileExistsInGuest \"{_vmxPath}\" \"{guestPath}\"",
             TimeSpan.FromSeconds(_timeouts.VmToolsCheckSeconds), ct);
     }
@@ -388,7 +456,7 @@ public sealed class VmwareManager
     public async Task<ProcessResult> CreateDirectoryInGuestAsync(string guestPath, CancellationToken ct = default)
     {
         return await RunVmrunAsync(
-            $"-T ws -gu \"{_guestUser}\" -gp \"{_guestPass}\" " +
+            $"{_hostArgs} -gu \"{_guestUser}\" -gp \"{_guestPass}\" " +
             $"createDirectoryInGuest \"{_vmxPath}\" \"{guestPath}\"",
             TimeSpan.FromSeconds(_timeouts.VmToolsCheckSeconds), ct);
     }
@@ -425,6 +493,13 @@ public sealed class VmwareManager
         }
     }
 
+    /// <summary>
+    /// Mask the values of password flags (-p, -gp, -vp) so credentials
+    /// never land in logs. The real args still go to the vmrun process.
+    /// </summary>
+    private static string RedactPasswords(string args) =>
+        Regex.Replace(args, "(-(?:p|gp|vp)) \"[^\"]*\"", "$1 \"***\"");
+
     private async Task<ProcessResult> RunVmrunCoreAsync(
         string args, TimeSpan timeout, CancellationToken ct)
     {
@@ -435,7 +510,7 @@ public sealed class VmwareManager
         if (!string.IsNullOrEmpty(_vmPassword))
             args = $"-vp \"{_vmPassword}\" {args}";
 
-        _logger.LogDebug("vmrun {Args}", args);
+        _logger.LogDebug("vmrun {Args}", RedactPasswords(args));
 
         var psi = new ProcessStartInfo
         {

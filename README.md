@@ -65,6 +65,10 @@ Copy `src/WinDbgMCP.Server/appsettings.example.json` to `appsettings.json` and e
   "Vm": {
     "VmxPath": "C:\\path\\to\\your\\vm.vmx",
     "VmrunPath": "C:\\Program Files (x86)\\VMware\\VMware Workstation\\vmrun.exe",
+    "HostType": "ws",
+    "HostUrl": "",
+    "HostUsername": "",
+    "HostPassword": "",
     "VmPassword": "",
     "GuestUsername": "YourUser",
     "GuestPassword": "YourPass"
@@ -83,6 +87,8 @@ Copy `src/WinDbgMCP.Server/appsettings.example.json` to `appsettings.json` and e
   }
 }
 ```
+
+**Remote hypervisors (ESXi / vCenter / shared Workstation):** VM and guest operations can target a VM on another machine. Set `HostType` to `esx`, `vc`, or `ws-shared`, point `HostUrl` at the hypervisor API (e.g. `https://esxi-host/sdk`), and provide `HostUsername`/`HostPassword`. For esx/vc, `VmxPath` is a datastore path like `[datastore1] win10/win10.vmx`. vmrun still runs locally, so VMware Workstation (or VIX) must be installed on this machine. All of this can also be switched at runtime via `vm_set_target`. Note that kernel debugging is independent of this: the KDNET target must be able to reach this host over UDP regardless of where the VM runs.
 
 </details>
 
@@ -138,7 +144,7 @@ dotnet run --project src/WinDbgMCP.Server/WinDbgMCP.Server.csproj
 | `vm_snapshot_restore` | Restore a named snapshot (debug sessions are cleanly torn down and can reconnect after) |
 | `vm_snapshot_list` | List available snapshots |
 | `vm_screenshot` | Capture VM display as PNG |
-| `vm_set_target` | Switch the active VM target at runtime (VMX path + credentials) |
+| `vm_set_target` | Switch the active VM target at runtime (VMX path + credentials, optionally a remote ESXi/vCenter host) |
 
 ### Kernel Debug Tools (7)
 | Tool | Description |
