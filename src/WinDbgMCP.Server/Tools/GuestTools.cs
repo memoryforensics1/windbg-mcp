@@ -32,7 +32,8 @@ public static class GuestTools
     [McpServerTool(Name = "guest_transfer_to_vm"), Description(
         "Copy a file from the host machine to the guest VM. " +
         "The VM must be running (target NOT frozen). " +
-        "Use this to deploy drivers, tools, or test binaries to the VM.")]
+        "Use this to deploy drivers, tools, or test binaries to the VM. " +
+        "Large files (>50MB) automatically use VMware shared folders for fast transfer.")]
     public static async Task<string> GuestTransferToVm(
         StateCoordinator state,
         GuestExecManager guest,
@@ -49,8 +50,7 @@ public static class GuestTools
         }
         catch (TimeoutException)
         {
-            return $"File transfer timed out. The file may be too large " +
-                   "or VMware Tools is not responding. Check get_system_state.";
+            return "File transfer timed out. VMware Tools may not be responding. Check get_system_state.";
         }
         catch (Exception ex)
         {
@@ -61,7 +61,8 @@ public static class GuestTools
     [McpServerTool(Name = "guest_transfer_from_vm"), Description(
         "Copy a file from the guest VM to the host machine. " +
         "The VM must be running (target NOT frozen). " +
-        "Use this to retrieve crash dumps, logs, or output files from the VM.")]
+        "Use this to retrieve crash dumps, logs, or output files from the VM. " +
+        "Automatically uses VMware shared folders for fast transfer when available.")]
     public static async Task<string> GuestTransferFromVm(
         StateCoordinator state,
         GuestExecManager guest,
@@ -78,8 +79,7 @@ public static class GuestTools
         }
         catch (TimeoutException)
         {
-            return $"File transfer timed out. The file may be too large " +
-                   "or VMware Tools is not responding. Check get_system_state.";
+            return "File transfer timed out. VMware Tools may not be responding. Check get_system_state.";
         }
         catch (Exception ex)
         {
