@@ -344,21 +344,23 @@ public sealed class VmwareManager
     }
 
     public async Task<ProcessResult> CopyFileToGuestAsync(
-        string hostPath, string guestPath, CancellationToken ct = default)
+        string hostPath, string guestPath, TimeSpan? timeout = null, CancellationToken ct = default)
     {
+        timeout ??= TimeSpan.FromSeconds(_timeouts.GuestFileTransferSeconds);
         return await RunVmrunAsync(
             $"-T ws -gu \"{_guestUser}\" -gp \"{_guestPass}\" " +
             $"copyFileFromHostToGuest \"{_vmxPath}\" \"{hostPath}\" \"{guestPath}\"",
-            TimeSpan.FromSeconds(_timeouts.GuestFileTransferSeconds), ct);
+            timeout.Value, ct);
     }
 
     public async Task<ProcessResult> CopyFileFromGuestAsync(
-        string guestPath, string hostPath, CancellationToken ct = default)
+        string guestPath, string hostPath, TimeSpan? timeout = null, CancellationToken ct = default)
     {
+        timeout ??= TimeSpan.FromSeconds(_timeouts.GuestFileTransferSeconds);
         return await RunVmrunAsync(
             $"-T ws -gu \"{_guestUser}\" -gp \"{_guestPass}\" " +
             $"copyFileFromGuestToHost \"{_vmxPath}\" \"{guestPath}\" \"{hostPath}\"",
-            TimeSpan.FromSeconds(_timeouts.GuestFileTransferSeconds), ct);
+            timeout.Value, ct);
     }
 
     public async Task<ProcessResult> ListProcessesInGuestAsync(CancellationToken ct = default)

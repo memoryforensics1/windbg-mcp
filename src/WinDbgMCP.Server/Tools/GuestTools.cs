@@ -32,7 +32,8 @@ public static class GuestTools
     [McpServerTool(Name = "guest_transfer_to_vm"), Description(
         "Copy a file from the host machine to the guest VM. " +
         "The VM must be running (target NOT frozen). " +
-        "Use this to deploy drivers, tools, or test binaries to the VM.")]
+        "Use this to deploy drivers, tools, or test binaries to the VM. " +
+        "Timeout scales with file size. Diagnostics logged to file_transfer.log.")]
     public static async Task<string> GuestTransferToVm(
         StateCoordinator state,
         GuestExecManager guest,
@@ -49,19 +50,21 @@ public static class GuestTools
         }
         catch (TimeoutException)
         {
-            return $"File transfer timed out. The file may be too large " +
-                   "or VMware Tools is not responding. Check get_system_state.";
+            return "File transfer timed out. Check file_transfer.log in the server directory for details. " +
+                   "VMware Tools may not be responding — check get_system_state.";
         }
         catch (Exception ex)
         {
-            return $"guest_transfer_to_vm failed: {ex.GetType().Name}: {ex.Message}";
+            return $"guest_transfer_to_vm failed: {ex.GetType().Name}: {ex.Message}. " +
+                   "Check file_transfer.log for details.";
         }
     }
 
     [McpServerTool(Name = "guest_transfer_from_vm"), Description(
         "Copy a file from the guest VM to the host machine. " +
         "The VM must be running (target NOT frozen). " +
-        "Use this to retrieve crash dumps, logs, or output files from the VM.")]
+        "Use this to retrieve crash dumps, logs, or output files from the VM. " +
+        "Diagnostics logged to file_transfer.log.")]
     public static async Task<string> GuestTransferFromVm(
         StateCoordinator state,
         GuestExecManager guest,
@@ -78,12 +81,13 @@ public static class GuestTools
         }
         catch (TimeoutException)
         {
-            return $"File transfer timed out. The file may be too large " +
-                   "or VMware Tools is not responding. Check get_system_state.";
+            return "File transfer timed out. Check file_transfer.log in the server directory for details. " +
+                   "VMware Tools may not be responding — check get_system_state.";
         }
         catch (Exception ex)
         {
-            return $"guest_transfer_from_vm failed: {ex.GetType().Name}: {ex.Message}";
+            return $"guest_transfer_from_vm failed: {ex.GetType().Name}: {ex.Message}. " +
+                   "Check file_transfer.log for details.";
         }
     }
 

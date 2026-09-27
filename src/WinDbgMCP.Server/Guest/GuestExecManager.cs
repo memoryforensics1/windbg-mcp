@@ -65,7 +65,7 @@ public sealed class GuestExecManager
             await File.WriteAllTextAsync(hostBat, batContent, System.Text.Encoding.ASCII, ct);
 
             // Copy batch file to guest
-            var copyBat = await _vmware.CopyFileToGuestAsync(hostBat, guestBat, ct);
+            var copyBat = await _vmware.CopyFileToGuestAsync(hostBat, guestBat, ct: ct);
             if (!copyBat.Success)
                 return GuestCommandResult.Failed(
                     $"Failed to copy command script to guest: {copyBat.Stderr.Trim()}");
@@ -85,7 +85,7 @@ public sealed class GuestExecManager
 
             try
             {
-                var copyOut = await _vmware.CopyFileFromGuestAsync(guestStdout, hostStdout, ct);
+                var copyOut = await _vmware.CopyFileFromGuestAsync(guestStdout, hostStdout, ct: ct);
                 if (copyOut.Success && File.Exists(hostStdout))
                     stdout = (await File.ReadAllTextAsync(hostStdout, ct)).Trim();
             }
@@ -96,7 +96,7 @@ public sealed class GuestExecManager
 
             try
             {
-                var copyErr = await _vmware.CopyFileFromGuestAsync(guestStderr, hostStderr, ct);
+                var copyErr = await _vmware.CopyFileFromGuestAsync(guestStderr, hostStderr, ct: ct);
                 if (copyErr.Success && File.Exists(hostStderr))
                     stderr = (await File.ReadAllTextAsync(hostStderr, ct)).Trim();
             }
@@ -143,8 +143,32 @@ public sealed class GuestExecManager
         }
     }
 
+    private static readonly string TransferLogPath = Path.Combine(
+        AppContext.BaseDirectory, "file_transfer.log");
+
+    private const int MinTransferTimeoutSeconds = 120;
+    private const int BytesPerSecondEstimate = 2 * 1024 * 1024; // 2 MB/s conservative
+
+    private TimeSpan ComputeTimeout(long fileSize)
+    {
+        var scaledSeconds = (int)(fileSize / BytesPerSecondEstimate) + 30; // 30s overhead
+        return TimeSpan.FromSeconds(Math.Max(scaledSeconds, MinTransferTimeoutSeconds));
+    }
+
+    private static void AppendTransferLog(string message)
+    {
+        try
+        {
+            var line = $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] {message}{Environment.NewLine}";
+            File.AppendAllText(TransferLogPath, line);
+        }
+        catch { }
+    }
+
     /// <summary>
     /// Copy a file from the host to the guest VM.
+    /// Timeout scales with file size (minimum 120s, ~2 MB/s estimate + 30s overhead).
+    /// All transfer attempts are logged to file_transfer.log for diagnostics.
     /// </summary>
     public async Task<string> CopyFileToGuestAsync(
         string hostPath, string guestPath, CancellationToken ct = default)
@@ -152,36 +176,99 @@ public sealed class GuestExecManager
         if (!File.Exists(hostPath))
             return $"Host file not found: {hostPath}";
 
-        var result = await _vmware.CopyFileToGuestAsync(hostPath, guestPath, ct);
-        if (!result.Success)
-            return $"File transfer failed: {result.Stderr}";
-
         var fileSize = new FileInfo(hostPath).Length;
-        return $"Copied {hostPath} -> guest:{guestPath} ({fileSize:N0} bytes)";
+        var timeout = ComputeTimeout(fileSize);
+
+        AppendTransferLog($"TO_GUEST START host={hostPath} guest={guestPath} " +
+            $"size={fileSize:N0} timeout={timeout.TotalSeconds}s");
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+
+        try
+        {
+            var result = await _vmware.CopyFileToGuestAsync(hostPath, guestPath, timeout, ct);
+            sw.Stop();
+
+            if (!result.Success)
+            {
+                AppendTransferLog($"TO_GUEST FAILED elapsed={sw.ElapsedMilliseconds}ms " +
+                    $"exitCode={result.ExitCode} stderr={result.Stderr.Trim()}");
+                return $"File transfer failed: {result.Stderr}";
+            }
+
+            AppendTransferLog($"TO_GUEST OK elapsed={sw.ElapsedMilliseconds}ms " +
+                $"size={fileSize:N0} rate={fileSize / Math.Max(sw.Elapsed.TotalSeconds, 0.001):N0} B/s");
+            return $"Copied {hostPath} -> guest:{guestPath} ({fileSize:N0} bytes, {sw.Elapsed.TotalSeconds:F1}s)";
+        }
+        catch (TimeoutException ex)
+        {
+            sw.Stop();
+            AppendTransferLog($"TO_GUEST TIMEOUT elapsed={sw.ElapsedMilliseconds}ms " +
+                $"timeout={timeout.TotalSeconds}s message={ex.Message}");
+            throw;
+        }
+        catch (Exception ex)
+        {
+            sw.Stop();
+            AppendTransferLog($"TO_GUEST EXCEPTION elapsed={sw.ElapsedMilliseconds}ms " +
+                $"type={ex.GetType().Name} message={ex.Message}");
+            throw;
+        }
     }
 
     /// <summary>
     /// Copy a file from the guest VM to the host.
+    /// Timeout uses the configured default (guest file size is unknown upfront).
+    /// All transfer attempts are logged to file_transfer.log for diagnostics.
     /// </summary>
     public async Task<string> CopyFileFromGuestAsync(
         string guestPath, string hostPath, CancellationToken ct = default)
     {
-        // Ensure host directory exists
         var hostDir = Path.GetDirectoryName(hostPath);
         if (!string.IsNullOrEmpty(hostDir) && !Directory.Exists(hostDir))
             Directory.CreateDirectory(hostDir);
 
-        var result = await _vmware.CopyFileFromGuestAsync(guestPath, hostPath, ct);
-        if (!result.Success)
-            return $"File transfer failed: {result.Stderr}";
+        AppendTransferLog($"FROM_GUEST START guest={guestPath} host={hostPath} " +
+            $"timeout={_config.Timeouts.GuestFileTransferSeconds}s");
+        var sw = System.Diagnostics.Stopwatch.StartNew();
 
-        if (File.Exists(hostPath))
+        try
         {
-            var fileSize = new FileInfo(hostPath).Length;
-            return $"Copied guest:{guestPath} -> {hostPath} ({fileSize:N0} bytes)";
-        }
+            var result = await _vmware.CopyFileFromGuestAsync(guestPath, hostPath, ct: ct);
+            sw.Stop();
 
-        return $"Transfer completed but file not found at {hostPath}";
+            if (!result.Success)
+            {
+                AppendTransferLog($"FROM_GUEST FAILED elapsed={sw.ElapsedMilliseconds}ms " +
+                    $"exitCode={result.ExitCode} stderr={result.Stderr.Trim()}");
+                return $"File transfer failed: {result.Stderr}";
+            }
+
+            if (File.Exists(hostPath))
+            {
+                var fileSize = new FileInfo(hostPath).Length;
+                AppendTransferLog($"FROM_GUEST OK elapsed={sw.ElapsedMilliseconds}ms " +
+                    $"size={fileSize:N0} rate={fileSize / Math.Max(sw.Elapsed.TotalSeconds, 0.001):N0} B/s");
+                return $"Copied guest:{guestPath} -> {hostPath} ({fileSize:N0} bytes, {sw.Elapsed.TotalSeconds:F1}s)";
+            }
+
+            AppendTransferLog($"FROM_GUEST MISSING elapsed={sw.ElapsedMilliseconds}ms " +
+                "file not found at destination after successful vmrun");
+            return $"Transfer completed but file not found at {hostPath}";
+        }
+        catch (TimeoutException ex)
+        {
+            sw.Stop();
+            AppendTransferLog($"FROM_GUEST TIMEOUT elapsed={sw.ElapsedMilliseconds}ms " +
+                $"timeout={_config.Timeouts.GuestFileTransferSeconds}s message={ex.Message}");
+            throw;
+        }
+        catch (Exception ex)
+        {
+            sw.Stop();
+            AppendTransferLog($"FROM_GUEST EXCEPTION elapsed={sw.ElapsedMilliseconds}ms " +
+                $"type={ex.GetType().Name} message={ex.Message}");
+            throw;
+        }
     }
 
     /// <summary>
