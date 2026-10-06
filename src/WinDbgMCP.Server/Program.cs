@@ -68,6 +68,7 @@ builder.Services.AddSingleton<StateCoordinator>(sp =>
     coordinator.GetPendingEventCount = () => dbgEng.PendingEventCount;
     coordinator.DetectBugcheckAsync = () => dbgEng.DetectBugcheckAsync();
     coordinator.IsRebootDetected = () => dbgEng.RebootDetected;
+    coordinator.DrainDebugEvents = () => dbgEng.DrainEvents();
 
     // Wire up UMD state delegates
     coordinator.IsFridaAttached = () => frida.IsAttached;

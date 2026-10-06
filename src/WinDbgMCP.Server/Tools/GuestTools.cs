@@ -14,7 +14,7 @@ public static class GuestTools
         "If the kernel debugger has frozen the VM, call kd_continue first. " +
         "Examples: 'ipconfig /all', 'sc query MyDriver', 'dir C:\\Windows\\System32'. " +
         "The command runs via cmd.exe /c, so pipe/redirect syntax works.")]
-    public static async Task<string> GuestRunCommand(
+    public static Task<string> GuestRunCommand(
         StateCoordinator state,
         GuestExecManager guest,
         [Description("Command to execute (runs via cmd.exe /c)")] string command,
@@ -22,11 +22,11 @@ public static class GuestTools
         [Description("Timeout in seconds (default 60)")] int timeoutSeconds = 60,
         CancellationToken ct = default)
     {
-        var precheck = await state.ValidatePreconditionsAsync("guest_run_command");
-        if (precheck != null) return precheck.ErrorMessage!;
-
-        var result = await guest.RunCommandAsync(command, workingDirectory, timeoutSeconds, ct);
-        return result.ToString();
+        return state.RunToolAsync("guest_run_command", async () =>
+        {
+            var result = await guest.RunCommandAsync(command, workingDirectory, timeoutSeconds, ct);
+            return result.ToString();
+        });
     }
 
     [McpServerTool(Name = "guest_transfer_to_vm"), Description(
@@ -34,28 +34,28 @@ public static class GuestTools
         "The VM must be running (target NOT frozen). " +
         "Use this to deploy drivers, tools, or test binaries to the VM. " +
         "Large files (>50MB) automatically use VMware shared folders for fast transfer.")]
-    public static async Task<string> GuestTransferToVm(
+    public static Task<string> GuestTransferToVm(
         StateCoordinator state,
         GuestExecManager guest,
         [Description("Path to the file on the host")] string hostPath,
         [Description("Destination path inside the guest VM")] string guestPath,
         CancellationToken ct = default)
     {
-        var precheck = await state.ValidatePreconditionsAsync("guest_transfer_to_vm");
-        if (precheck != null) return precheck.ErrorMessage!;
-
-        try
+        return state.RunToolAsync("guest_transfer_to_vm", async () =>
         {
-            return await guest.CopyFileToGuestAsync(hostPath, guestPath, ct);
-        }
-        catch (TimeoutException)
-        {
-            return "File transfer timed out. VMware Tools may not be responding. Check get_system_state.";
-        }
-        catch (Exception ex)
-        {
-            return $"guest_transfer_to_vm failed: {ex.GetType().Name}: {ex.Message}";
-        }
+            try
+            {
+                return await guest.CopyFileToGuestAsync(hostPath, guestPath, ct);
+            }
+            catch (TimeoutException)
+            {
+                return "File transfer timed out. VMware Tools may not be responding. Check get_system_state.";
+            }
+            catch (Exception ex)
+            {
+                return $"guest_transfer_to_vm failed: {ex.GetType().Name}: {ex.Message}";
+            }
+        });
     }
 
     [McpServerTool(Name = "guest_transfer_from_vm"), Description(
@@ -63,80 +63,80 @@ public static class GuestTools
         "The VM must be running (target NOT frozen). " +
         "Use this to retrieve crash dumps, logs, or output files from the VM. " +
         "Automatically uses VMware shared folders for fast transfer when available.")]
-    public static async Task<string> GuestTransferFromVm(
+    public static Task<string> GuestTransferFromVm(
         StateCoordinator state,
         GuestExecManager guest,
         [Description("Path to the file inside the guest VM")] string guestPath,
         [Description("Destination path on the host")] string hostPath,
         CancellationToken ct = default)
     {
-        var precheck = await state.ValidatePreconditionsAsync("guest_transfer_from_vm");
-        if (precheck != null) return precheck.ErrorMessage!;
-
-        try
+        return state.RunToolAsync("guest_transfer_from_vm", async () =>
         {
-            return await guest.CopyFileFromGuestAsync(guestPath, hostPath, ct);
-        }
-        catch (TimeoutException)
-        {
-            return "File transfer timed out. VMware Tools may not be responding. Check get_system_state.";
-        }
-        catch (Exception ex)
-        {
-            return $"guest_transfer_from_vm failed: {ex.GetType().Name}: {ex.Message}";
-        }
+            try
+            {
+                return await guest.CopyFileFromGuestAsync(guestPath, hostPath, ct);
+            }
+            catch (TimeoutException)
+            {
+                return "File transfer timed out. VMware Tools may not be responding. Check get_system_state.";
+            }
+            catch (Exception ex)
+            {
+                return $"guest_transfer_from_vm failed: {ex.GetType().Name}: {ex.Message}";
+            }
+        });
     }
 
     [McpServerTool(Name = "guest_list_processes"), Description(
         "List all running processes inside the guest VM. " +
         "The VM must be running (target NOT frozen). " +
         "Returns process names and PIDs.")]
-    public static async Task<string> GuestListProcesses(
+    public static Task<string> GuestListProcesses(
         StateCoordinator state,
         GuestExecManager guest,
         CancellationToken ct = default)
     {
-        var precheck = await state.ValidatePreconditionsAsync("guest_list_processes");
-        if (precheck != null) return precheck.ErrorMessage!;
-
-        try
+        return state.RunToolAsync("guest_list_processes", async () =>
         {
-            return await guest.ListProcessesAsync(ct);
-        }
-        catch (TimeoutException)
-        {
-            return "Process listing timed out. VMware Tools may not be responding.";
-        }
-        catch (Exception ex)
-        {
-            return $"guest_list_processes failed: {ex.GetType().Name}: {ex.Message}";
-        }
+            try
+            {
+                return await guest.ListProcessesAsync(ct);
+            }
+            catch (TimeoutException)
+            {
+                return "Process listing timed out. VMware Tools may not be responding.";
+            }
+            catch (Exception ex)
+            {
+                return $"guest_list_processes failed: {ex.GetType().Name}: {ex.Message}";
+            }
+        });
     }
 
     [McpServerTool(Name = "guest_kill_process"), Description(
         "Kill a process inside the guest VM by PID. " +
         "The VM must be running (target NOT frozen). " +
         "Use guest_list_processes first to find the PID.")]
-    public static async Task<string> GuestKillProcess(
+    public static Task<string> GuestKillProcess(
         StateCoordinator state,
         GuestExecManager guest,
         [Description("Process ID (PID) to kill")] uint pid,
         CancellationToken ct = default)
     {
-        var precheck = await state.ValidatePreconditionsAsync("guest_kill_process");
-        if (precheck != null) return precheck.ErrorMessage!;
-
-        try
+        return state.RunToolAsync("guest_kill_process", async () =>
         {
-            return await guest.KillProcessAsync(pid, ct);
-        }
-        catch (TimeoutException)
-        {
-            return $"Kill process {pid} timed out. Process may still be running.";
-        }
-        catch (Exception ex)
-        {
-            return $"guest_kill_process failed: {ex.GetType().Name}: {ex.Message}";
-        }
+            try
+            {
+                return await guest.KillProcessAsync(pid, ct);
+            }
+            catch (TimeoutException)
+            {
+                return $"Kill process {pid} timed out. Process may still be running.";
+            }
+            catch (Exception ex)
+            {
+                return $"guest_kill_process failed: {ex.GetType().Name}: {ex.Message}";
+            }
+        });
     }
 }

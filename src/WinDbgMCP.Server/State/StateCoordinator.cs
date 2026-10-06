@@ -1,5 +1,7 @@
+using System.Text;
 using Microsoft.Extensions.Logging;
 using WinDbgMCP.Server.Configuration;
+using WinDbgMCP.Server.KernelDebug.Models;
 
 namespace WinDbgMCP.Server.State;
 
@@ -22,8 +24,14 @@ public sealed class StateCoordinator
     // BSOD detection — only check once per break-in, not every refresh
     private bool _bsodCheckedForCurrentBreak;
 
+    // State transitions observed since the last tool result was produced.
+    // Flushed into the banner RunToolAsync prepends to every tool result.
+    private readonly List<string> _alerts = new();
+
     // Public read-only accessor for state
     public SystemState State => _state;
+
+    public Func<List<DebugEvent>>? DrainDebugEvents { get; set; }
 
     // These will be set when the managers are created
     // Using Func<> delegates to avoid circular dependencies during construction
@@ -51,6 +59,112 @@ public sealed class StateCoordinator
         _config = config;
         _logger = logger;
         _state.VmxPath = config.Vm.VmxPath;
+    }
+
+    /// <summary>
+    /// Runs a tool: precondition check, body, then a post-call refresh so every
+    /// result carries a "since your last call" banner with state transitions and
+    /// debug events that happened in between. This is the only channel through
+    /// which the LLM learns about asynchronous target events, so no tool bypasses it.
+    /// </summary>
+    public async Task<string> RunToolAsync(string toolName, Func<Task<string>> body)
+    {
+        var precheck = await ValidatePreconditionsAsync(toolName);
+
+        string result;
+        var executed = precheck == null || precheck.IsSuccess;
+        if (!executed)
+        {
+            result = $"NOT EXECUTED: '{toolName}' was refused by the state gate. {precheck!.Message}";
+        }
+        else
+        {
+            result = await body();
+            if (precheck != null)
+                result = precheck.Message + " " + result;
+        }
+
+        return await PrependAlertsAsync(result, executed);
+    }
+
+    private async Task<string> PrependAlertsAsync(string result, bool executed)
+    {
+        await _lock.WaitAsync();
+        try
+        {
+            try
+            {
+                await RefreshStateAsync();
+            }
+            catch (Exception ex)
+            {
+                _logger.LogDebug(ex, "Post-tool state refresh failed");
+            }
+
+            var banner = BuildAlertBanner(executed);
+            return banner == null ? result : banner + "\n" + result;
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
+    private static readonly HashSet<DebugEventKind> ImportantEventKinds = new()
+    {
+        DebugEventKind.Bugcheck,
+        DebugEventKind.BreakpointHit,
+        DebugEventKind.BreakIn,
+        DebugEventKind.ExceptionSecondChance,
+        DebugEventKind.SystemError,
+        DebugEventKind.TargetRebooted,
+        DebugEventKind.SessionEnded,
+        DebugEventKind.Error,
+    };
+
+    private string? BuildAlertBanner(bool executed)
+    {
+        List<DebugEvent> events;
+        try
+        {
+            events = DrainDebugEvents?.Invoke() ?? new List<DebugEvent>();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Draining debug events failed");
+            events = new List<DebugEvent>();
+        }
+
+        var important = events.Where(e => ImportantEventKinds.Contains(e.Type)).ToList();
+        var firstChance = events.Where(e => e.Type == DebugEventKind.ExceptionFirstChance).ToList();
+        var other = events.Count - important.Count - firstChance.Count;
+
+        if (_alerts.Count == 0 && important.Count == 0 && firstChance.Count == 0)
+        {
+            return null;
+        }
+
+        var sb = new StringBuilder();
+        sb.AppendLine("!!! SINCE YOUR LAST CALL !!!");
+        foreach (var alert in _alerts)
+            sb.AppendLine($"- {alert}");
+        foreach (var evt in important.Take(10))
+            sb.AppendLine($"- Event {evt}");
+        if (important.Count > 10)
+            sb.AppendLine($"- ... and {important.Count - 10} more events");
+        foreach (var evt in firstChance.Take(3))
+            sb.AppendLine($"- {evt}");
+        if (firstChance.Count > 3)
+            sb.AppendLine($"- ... and {firstChance.Count - 3} more first-chance exceptions (informational)");
+        if (other > 0)
+            sb.AppendLine($"- {other} module/process/thread events (informational)");
+        sb.AppendLine(executed
+            ? "- The call below ran after or during the above; read its result in that light."
+            : "- The call below was NOT executed: the state changed before it ran and its preconditions no longer hold.");
+        sb.Append("!!! END !!!");
+
+        _alerts.Clear();
+        return sb.ToString();
     }
 
     /// <summary>
@@ -132,6 +246,8 @@ public sealed class StateCoordinator
             if (status == DebugExecutionStatus.NoDebuggee && !rebooted)
             {
                 _logger.LogWarning("Kernel debugger connection lost (NoDebuggee detected)");
+                _alerts.Add("KERNEL DEBUGGER CONNECTION LOST: the engine reports no debuggee. " +
+                            "Call kd_connect to reattach.");
                 _state.KdConnected = false;
                 _state.KdBreakReason = null;
                 _state.IsBugcheck = false;
@@ -143,6 +259,8 @@ public sealed class StateCoordinator
             if (rebooted && !_state.KdRebootDetected)
             {
                 _logger.LogWarning("Target reboot detected; kernel state reset");
+                _alerts.Add("TARGET REBOOTED: the kernel restarted; previous state (and any BSOD) is gone. " +
+                            "get_system_state shows whether it is at the initial breakpoint (then kd_continue).");
                 _state.IsBugcheck = false;
                 _state.BugcheckCode = null;
                 _state.KdBreakReason = "Target rebooted";
@@ -179,6 +297,9 @@ public sealed class StateCoordinator
                         _state.IsBugcheck = true;
                         _state.BugcheckCode = bugcheckCode;
                         _logger.LogWarning("BSOD detected during state refresh: {Code}", bugcheckCode);
+                        _alerts.Add($"BSOD DETECTED (bugcheck {bugcheckCode}): the guest OS has crashed and is " +
+                                    "halted in the debugger. Guest operations will not work. " +
+                                    ErrorMessages.BsodRecoveryOptions);
                     }
                 }
                 catch (Exception ex)
@@ -233,7 +354,10 @@ public sealed class StateCoordinator
             {
                 try
                 {
+                    var previous = _state.VmPower;
                     _state.VmPower = await GetVmPowerStateAsync();
+                    if (previous != VmPowerState.Unknown && previous != _state.VmPower)
+                        _alerts.Add($"VM POWER STATE CHANGED: {previous} -> {_state.VmPower}.");
                 }
                 catch (Exception ex)
                 {
@@ -254,9 +378,13 @@ public sealed class StateCoordinator
                 try
                 {
                     var toolsTimeout = TimeSpan.FromSeconds(_config.Timeouts.VmToolsCheckSeconds);
+                    var previousTools = _state.VmTools;
                     _state.VmTools = await AreToolsRunningAsync(toolsTimeout)
                         ? VmToolsState.Running
                         : VmToolsState.NotResponding;
+                    if (previousTools == VmToolsState.Running && _state.VmTools == VmToolsState.NotResponding)
+                        _alerts.Add("VMWARE TOOLS STOPPED RESPONDING: the guest may be rebooting, hung, or crashed. " +
+                                    "Guest operations will fail until it recovers; check get_system_state / vm_screenshot.");
                 }
                 catch (Exception ex)
                 {

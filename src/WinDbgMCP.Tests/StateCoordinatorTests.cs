@@ -1,5 +1,6 @@
 using Microsoft.Extensions.Logging.Abstractions;
 using WinDbgMCP.Server.Configuration;
+using WinDbgMCP.Server.KernelDebug.Models;
 using WinDbgMCP.Server.State;
 
 namespace WinDbgMCP.Tests;
@@ -25,6 +26,7 @@ public class StateCoordinatorTests : IDisposable
     private uint? _dbgsrvPid = null;
     private bool _rebootDetected = false;
     private Func<Task<(bool, string?)>>? _detectBugcheck = null;
+    private readonly List<DebugEvent> _pendingEvents = new();
 
     public StateCoordinatorTests()
     {
@@ -50,6 +52,12 @@ public class StateCoordinatorTests : IDisposable
         _coordinator.IsRebootDetected = () => _rebootDetected;
         _coordinator.DetectBugcheckAsync = () =>
             _detectBugcheck?.Invoke() ?? Task.FromResult((false, (string?)null));
+        _coordinator.DrainDebugEvents = () =>
+        {
+            var drained = _pendingEvents.ToList();
+            _pendingEvents.Clear();
+            return drained;
+        };
     }
 
     public void Dispose() { }
@@ -782,5 +790,114 @@ public class StateCoordinatorTests : IDisposable
         SetKdConnectedBroken();
         await _coordinator.RefreshStateAsync();
         Assert.False(_coordinator.State.GuestOpsAvailable);
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    //  RUN TOOL / ALERT BANNER TESTS
+    // ═══════════════════════════════════════════════════════════════
+
+    [Fact]
+    public async Task RunTool_NoBannerWhenNothingHappened()
+    {
+        SetVmRunning();
+        await _coordinator.RefreshStateAsync();
+
+        var result = await _coordinator.RunToolAsync("guest_run_command", () => Task.FromResult("ok"));
+
+        Assert.Equal("ok", result);
+    }
+
+    [Fact]
+    public async Task RunTool_RefusedCallSaysNotExecuted()
+    {
+        SetVmRunning();
+        SetKdConnectedBroken();
+        await _coordinator.RefreshStateAsync();
+
+        var ran = false;
+        var result = await _coordinator.RunToolAsync("guest_run_command", () => { ran = true; return Task.FromResult("ok"); });
+
+        Assert.False(ran);
+        Assert.StartsWith("NOT EXECUTED: 'guest_run_command'", result);
+        Assert.Contains("kd_continue", result);
+    }
+
+    [Fact]
+    public async Task RunTool_BsodBeforeCall_BannerExplainsRefusal()
+    {
+        SetVmRunning();
+        SetKdConnectedRunning();
+        await _coordinator.RefreshStateAsync();
+
+        // Target crashed between calls: pump caught it, engine now at Break
+        _execStatus = DebugExecutionStatus.Break;
+        _detectBugcheck = () => Task.FromResult((true, (string?)"0x000000D1"));
+        _pendingEvents.Add(new DebugEvent { Type = DebugEventKind.Bugcheck, Details = "BSOD: kernel entered the bugcheck handler" });
+
+        var result = await _coordinator.RunToolAsync("guest_run_command", () => Task.FromResult("ok"));
+
+        Assert.StartsWith("!!! SINCE YOUR LAST CALL !!!", result);
+        Assert.Contains("BSOD DETECTED (bugcheck 0x000000D1)", result);
+        Assert.Contains("Event [", result);
+        Assert.Contains("Bugcheck: BSOD: kernel entered the bugcheck handler", result);
+        Assert.Contains("was NOT executed", result);
+        Assert.Contains("NOT EXECUTED: 'guest_run_command'", result);
+        Assert.DoesNotContain("\nok", result.Replace("NOT EXECUTED", ""));
+    }
+
+    [Fact]
+    public async Task RunTool_EventsDuringCallAreReportedOnceAndFlushed()
+    {
+        SetVmRunning();
+        SetKdConnectedRunning();
+        await _coordinator.RefreshStateAsync();
+
+        var result = await _coordinator.RunToolAsync("kd_wait_for_event", () =>
+        {
+            _pendingEvents.Add(new DebugEvent { Type = DebugEventKind.BreakpointHit, Details = "Breakpoint 0 hit at 0x1" });
+            _pendingEvents.Add(new DebugEvent { Type = DebugEventKind.ModuleLoaded, Details = "Module loaded: x" });
+            _pendingEvents.Add(new DebugEvent { Type = DebugEventKind.ExceptionFirstChance, Details = "First-chance exception 0xC0000005" });
+            return Task.FromResult("waited");
+        });
+
+        Assert.Contains("BreakpointHit: Breakpoint 0 hit at 0x1", result);
+        Assert.Contains("First-chance exception 0xC0000005", result);
+        Assert.Contains("1 module/process/thread events (informational)", result);
+        Assert.Contains("ran after or during the above", result);
+        Assert.EndsWith("waited", result);
+
+        var second = await _coordinator.RunToolAsync("kd_wait_for_event", () => Task.FromResult("again"));
+        Assert.Equal("again", second);
+    }
+
+    [Fact]
+    public async Task RunTool_VmPowerChangeIsAlerted()
+    {
+        SetVmRunning();
+        await _coordinator.RefreshStateAsync();
+        var first = await _coordinator.RunToolAsync("vm_snapshot_list", () => Task.FromResult("list"));
+        Assert.Equal("list", first);
+
+        // Force the throttled power refresh to run again and report Off
+        await Task.Delay(2100);
+        _vmPower = VmPowerState.Off;
+
+        var result = await _coordinator.RunToolAsync("vm_snapshot_list", () => Task.FromResult("list"));
+
+        Assert.Contains("VM POWER STATE CHANGED: Running -> Off", result);
+        Assert.EndsWith("list", result);
+    }
+
+    [Fact]
+    public async Task RunTool_PrecheckWarningIsPrepended()
+    {
+        SetVmRunning();
+        SetKdConnectedRunning();
+        await _coordinator.RefreshStateAsync();
+
+        var result = await _coordinator.RunToolAsync("vm_stop", () => Task.FromResult("stopped"));
+
+        Assert.Contains("WARNING: Kernel debugger session will be lost", result);
+        Assert.EndsWith("stopped", result);
     }
 }
