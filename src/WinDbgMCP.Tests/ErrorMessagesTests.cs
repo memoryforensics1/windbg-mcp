@@ -35,6 +35,7 @@ public class ErrorMessagesTests
         Assert.Contains("!analyze -v", ErrorMessages.BsodRecoveryOptions);
         Assert.Contains("kd_continue", ErrorMessages.BsodRecoveryOptions);
         Assert.Contains("vm_snapshot_restore", ErrorMessages.BsodRecoveryOptions);
+        Assert.Contains("vm_stop(hard=true)", ErrorMessages.BsodRecoveryOptions);
     }
 
     [Fact]
@@ -52,6 +53,7 @@ public class ErrorMessagesTests
         var msg = ErrorMessages.BsodCannotBreak("0x0000007E");
         Assert.Contains("BSOD", msg);
         Assert.Contains("!analyze -v", msg);
+        Assert.DoesNotContain("cannot resume", msg);
     }
 
     [Fact]

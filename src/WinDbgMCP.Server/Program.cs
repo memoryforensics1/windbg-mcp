@@ -212,7 +212,7 @@ static string BuildServerInstructions(ServerConfig config)
     sb.AppendLine();
     sb.AppendLine("3. **kd_wait_for_event is safe**: It ALWAYS returns within the timeout. Use it after kd_continue + breakpoint to wait for the breakpoint to trigger.");
     sb.AppendLine();
-    sb.AppendLine("4. **After BSOD**: get_system_state will show IsBugcheck=True. You can still debug — use kd_execute('!analyze -v'), kd_execute('k'), kd_execute('r'), etc. to investigate the crash. Guest operations won't work while at the BSOD. To recover: (a) kd_continue — the VM will reboot on its own, wait for it to come back up and guest ops work again, OR (b) vm_snapshot_restore to revert to a clean state. Choose whichever fits your goal.");
+    sb.AppendLine("4. **After BSOD**: get_system_state will show BSOD DETECTED. You can still debug — use kd_execute('!analyze -v'), kd_execute('k'), kd_execute('r'), etc. to investigate the crash. Guest operations won't work while at the BSOD. To recover: (a) kd_continue — the kernel writes the dump and breaks in a second time (still BSOD; that is expected), kd_continue again and the VM reboots, get_system_state then shows TARGET REBOOTED at the initial breakpoint, and one more kd_continue boots the OS; OR (b) vm_snapshot_restore to revert to a clean state; OR (c) vm_stop(hard=true) + vm_start if the VM never reboots on its own. Choose whichever fits your goal.");
     sb.AppendLine();
     sb.AppendLine("5. **Snapshot restore resets everything**: All debug sessions (KD, Frida, dbgsrv) are destroyed. Reconnect after restoring.");
     sb.AppendLine();

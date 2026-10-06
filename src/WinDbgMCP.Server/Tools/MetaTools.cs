@@ -55,7 +55,7 @@ public static class MetaTools
                 {
                     sb.AppendLine($"BSOD DETECTED:     {s.BugcheckCode}");
                     sb.AppendLine($"   The OS has CRASHED. Guest ops will NOT work.");
-                    sb.AppendLine($"   Run kd_execute('!analyze -v') or vm_snapshot_restore.");
+                    sb.AppendLine($"   {ErrorMessages.BsodRecoveryOptions}");
                 }
             }
 

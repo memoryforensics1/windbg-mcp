@@ -73,10 +73,13 @@ public static class ErrorMessages
 
     // === BSOD-Specific Errors ===
     public const string BsodRecoveryOptions =
-        "Options: (1) kd_execute('!analyze -v') to analyze the crash, " +
-        "(2) kd_continue to let the kernel finish the crash dump and reboot " +
-        "(get_system_state then shows TARGET REBOOTED; kd_continue again to boot), " +
-        "(3) vm_snapshot_restore to revert to a clean state.";
+        "Options: (1) kd_execute('!analyze -v') to analyze the crash. " +
+        "(2) kd_continue to let the crash run its course: the kernel writes the dump and " +
+        "breaks in a second time (kd_wait_for_event shows a Bugcheck event; BSOD state is " +
+        "re-flagged), kd_continue again and the VM reboots; get_system_state then shows " +
+        "TARGET REBOOTED at the initial breakpoint, and a final kd_continue boots the OS. " +
+        "(3) vm_snapshot_restore to revert to a clean state. " +
+        "(4) vm_stop(hard=true) + vm_start if the target never comes back (auto-reboot disabled).";
 
     public static string BsodGuestOpsUnavailable(string? bugcheckCode) =>
         $"BSOD DETECTED — Bugcheck {bugcheckCode ?? "unknown"}. " +
@@ -90,7 +93,11 @@ public static class ErrorMessages
 
     public static string BsodContinueWarning(string? bugcheckCode) =>
         $"WARNING: target was halted at a BSOD (Bugcheck {bugcheckCode ?? "unknown"}). " +
-        "The kernel will now finish the crash dump and then reboot (or halt, if " +
-        "auto-reboot is disabled). Poll get_system_state: when it shows TARGET REBOOTED " +
-        "the debugger is at the new initial breakpoint — call kd_continue to let the OS boot.";
+        "Expected sequence now: the kernel runs bugcheck callbacks and writes the crash dump, " +
+        "then breaks in a SECOND time (kd_wait_for_event reports a Bugcheck event and the BSOD " +
+        "is flagged again — that is normal, not a failed continue). kd_continue once more and " +
+        "the VM reboots; get_system_state then shows TARGET REBOOTED at the initial breakpoint " +
+        "and a final kd_continue boots the OS. If nothing happens for ~2 minutes the VM has " +
+        "auto-reboot disabled and is halted for good: use vm_stop(hard=true) + vm_start, " +
+        "or vm_snapshot_restore.";
 }
