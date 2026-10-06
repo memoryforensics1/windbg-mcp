@@ -20,7 +20,7 @@ public sealed class DbgEngManager : IDisposable
     private readonly ServerConfig _config;
     private readonly ILogger<DbgEngManager> _logger;
     private readonly OutputCapture _outputCapture = new();
-    private readonly DebugEventCallbacks _eventCallbacks = new();
+    private readonly DebugEventCallbacks _eventCallbacks;
 
     private DebugClient? _client;
     private bool _disposed;
@@ -34,6 +34,7 @@ public sealed class DbgEngManager : IDisposable
         _thread = thread;
         _config = config;
         _logger = logger;
+        _eventCallbacks = new DebugEventCallbacks(logger);
 
         // Set up the event pump action
         _thread.PumpEventsAction = PumpEvents;

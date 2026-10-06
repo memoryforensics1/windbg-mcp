@@ -1,6 +1,8 @@
 using System.Collections.Concurrent;
 using ClrDebug;
 using ClrDebug.DbgEng;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using WinDbgMCP.Server.KernelDebug.Models;
 
 namespace WinDbgMCP.Server.KernelDebug;
@@ -12,6 +14,7 @@ namespace WinDbgMCP.Server.KernelDebug;
 public sealed class DebugEventCallbacks : DebugBaseEventCallbacks
 {
     private readonly ConcurrentQueue<DebugEvent> _eventQueue = new();
+    private readonly ILogger _logger;
     private volatile DEBUG_STATUS _lastExecutionStatus = DEBUG_STATUS.NO_DEBUGGEE;
     private volatile bool _hasBreakingEvent;
     private volatile bool _rebootDetected;
@@ -21,6 +24,11 @@ public sealed class DebugEventCallbacks : DebugBaseEventCallbacks
     private const long DbgStatusBugcheckFirst = 3;
     private const long DbgStatusBugcheckSecond = 4;
     private const long DbgStatusFatal = 5;
+
+    public DebugEventCallbacks(ILogger? logger = null)
+    {
+        _logger = logger ?? NullLogger.Instance;
+    }
 
     public int PendingCount => _eventQueue.Count;
     public DEBUG_STATUS LastExecutionStatus => _lastExecutionStatus;
@@ -56,6 +64,7 @@ public sealed class DebugEventCallbacks : DebugBaseEventCallbacks
 
     public override DEBUG_STATUS Breakpoint(IntPtr bp)
     {
+        _logger.LogInformation("DbgEng event: Breakpoint");
         _hasBreakingEvent = true;
 
         string details = "Breakpoint hit";
@@ -79,8 +88,14 @@ public sealed class DebugEventCallbacks : DebugBaseEventCallbacks
         return DEBUG_STATUS.BREAK;
     }
 
-    public override DEBUG_STATUS Exception(ref EXCEPTION_RECORD64 exception, int firstChance)
+    public override unsafe DEBUG_STATUS Exception(ref EXCEPTION_RECORD64 exception, int firstChance)
     {
+        _logger.LogInformation(
+            "DbgEng event: Exception code=0x{Code:X8} firstChance={First} params={Params} info0=0x{Info0:X} at 0x{Addr:X16}",
+            (uint)exception.ExceptionCode, firstChance, exception.NumberParameters,
+            exception.NumberParameters > 0 ? exception.ExceptionInformation[0] : 0,
+            exception.ExceptionAddress);
+
         if (firstChance != 0)
         {
             if ((uint)exception.ExceptionCode == StatusBreakpoint)
@@ -204,6 +219,7 @@ public sealed class DebugEventCallbacks : DebugBaseEventCallbacks
 
     public override DEBUG_STATUS SystemError(int error, int level)
     {
+        _logger.LogInformation("DbgEng event: SystemError error=0x{Error:X8} level={Level}", error, level);
         _hasBreakingEvent = true;
         _eventQueue.Enqueue(new DebugEvent
         {
@@ -215,6 +231,7 @@ public sealed class DebugEventCallbacks : DebugBaseEventCallbacks
 
     public override HRESULT SessionStatus(DEBUG_SESSION status)
     {
+        _logger.LogInformation("DbgEng event: SessionStatus {Status}", status);
         if (status == DEBUG_SESSION.END)
         {
             _eventQueue.Enqueue(new DebugEvent
@@ -254,6 +271,8 @@ public sealed class DebugEventCallbacks : DebugBaseEventCallbacks
         if ((flags & DEBUG_CES.EXECUTION_STATUS) != 0)
         {
             _lastExecutionStatus = (DEBUG_STATUS)argument;
+            _logger.LogInformation("DbgEng event: ExecutionStatus -> {Status} (raw=0x{Raw:X})",
+                _lastExecutionStatus, argument);
         }
         return HRESULT.S_OK;
     }
