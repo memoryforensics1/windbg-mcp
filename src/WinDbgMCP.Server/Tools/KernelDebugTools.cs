@@ -95,14 +95,22 @@ public static class KernelDebugTools
         {
             var result = await dbgEng.BreakAsync();
 
-            // Check for BSOD after break
-            var (isBugcheck, bugcheckCode) = await dbgEng.DetectBugcheckAsync();
-            if (isBugcheck)
+            // A probe failure must not be reported as a failed break; the state
+            // refresh retries the probe on the next tool call anyway.
+            try
             {
-                state.SetBsodDetected(bugcheckCode);
-                return result + $"\n\nWARNING: BSOD DETECTED (bugcheck {bugcheckCode}). " +
-                       "The OS has crashed; guest operations will NOT work. " +
-                       ErrorMessages.BsodRecoveryOptions;
+                var (isBugcheck, bugcheckCode) = await dbgEng.DetectBugcheckAsync();
+                if (isBugcheck)
+                {
+                    state.SetBsodDetected(bugcheckCode);
+                    return result + $"\n\nWARNING: BSOD DETECTED (bugcheck {bugcheckCode}). " +
+                           "The OS has crashed; guest operations will NOT work. " +
+                           ErrorMessages.BsodRecoveryOptions;
+                }
+            }
+            catch (Exception ex)
+            {
+                return result + $"\n\n(BSOD probe failed: {ex.GetType().Name}; call get_system_state to re-check.)";
             }
 
             return result;

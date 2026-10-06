@@ -629,15 +629,32 @@ public class StateCoordinatorTests : IDisposable
     {
         SetVmRunning();
         SetKdConnectedBroken();
-        var calls = 0;
-        _detectBugcheck = () => { calls++; return Task.FromResult((true, (string?)"0xD1")); };
+        _detectBugcheck = () => Task.FromResult((true, (string?)"0xD1"));
 
-        await _coordinator.RefreshStateAsync();
         await _coordinator.RefreshStateAsync();
 
         Assert.True(_coordinator.State.IsBugcheck);
         Assert.Equal("0xD1", _coordinator.State.BugcheckCode);
+    }
+
+    [Fact]
+    public async Task RefreshState_ProbesBugcheckOncePerBreak()
+    {
+        SetVmRunning();
+        SetKdConnectedBroken();
+        var calls = 0;
+        _detectBugcheck = () => { calls++; return Task.FromResult((false, (string?)null)); };
+
+        await _coordinator.RefreshStateAsync();
+        await _coordinator.RefreshStateAsync();
         Assert.Equal(1, calls);
+
+        // Leaving and re-entering Break re-arms the probe
+        _execStatus = DebugExecutionStatus.Go;
+        await _coordinator.RefreshStateAsync();
+        _execStatus = DebugExecutionStatus.Break;
+        await _coordinator.RefreshStateAsync();
+        Assert.Equal(2, calls);
     }
 
     [Fact]

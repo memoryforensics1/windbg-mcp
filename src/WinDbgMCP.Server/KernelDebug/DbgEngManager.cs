@@ -507,36 +507,53 @@ public sealed class DbgEngManager : IDisposable
             if (_client == null)
                 return (false, (string?)null);
 
-            // .bugcheck reads KiBugCheckData, which is nonzero only once KeBugCheck
-            // has run. .lastevent for a live BSOD just says "Break instruction
-            // exception", so it is only a fallback if .bugcheck is unavailable.
+            // .bugcheck reads KiBugCheckData, which KeBugCheckEx fills in — so a
+            // breakpoint sitting *at* nt!KeBugCheckEx is correctly not a bugcheck yet.
+            // .lastevent for a live BSOD just says "Break instruction exception",
+            // so it is only a fallback if .bugcheck output cannot be parsed.
             _outputCapture.Clear();
             _client.Control.TryExecute(
                 DEBUG_OUTCTL.THIS_CLIENT, ".bugcheck", DEBUG_EXECUTE.DEFAULT);
             var bugcheckOutput = _outputCapture.GetAndClear();
 
-            var codeMatch = Regex.Match(bugcheckOutput, @"Bugcheck code\s+([0-9A-Fa-f]{1,16})",
-                RegexOptions.IgnoreCase);
-            if (codeMatch.Success)
-            {
-                var code = Convert.ToUInt64(codeMatch.Groups[1].Value, 16);
-                return code != 0
-                    ? (true, (string?)$"0x{code:X8}")
-                    : (false, (string?)null);
-            }
+            var parsed = ParseBugcheckOutput(bugcheckOutput);
+            if (parsed != null)
+                return parsed.Value;
+
+            _logger.LogDebug(".bugcheck output not recognised, falling back to .lastevent: {Output}",
+                bugcheckOutput.Trim());
 
             _outputCapture.Clear();
             _client.Control.TryExecute(
                 DEBUG_OUTCTL.THIS_CLIENT, ".lastevent", DEBUG_EXECUTE.DEFAULT);
-            var lastEvent = _outputCapture.GetAndClear();
-
-            var lastEventMatch = Regex.Match(lastEvent, @"Bug\s*check\s+([0-9A-Fa-f]+)",
-                RegexOptions.IgnoreCase);
-            if (lastEventMatch.Success)
-                return (true, (string?)$"0x{lastEventMatch.Groups[1].Value}");
-
-            return (false, (string?)null);
+            return ParseLastEventFallback(_outputCapture.GetAndClear());
         }, timeout);
+    }
+
+    /// <summary>
+    /// Parses ".bugcheck" output ("Bugcheck code 000000D1"). Returns null if the
+    /// output does not carry a bugcheck code line at all.
+    /// </summary>
+    public static (bool IsBugcheck, string? BugcheckCode)? ParseBugcheckOutput(string output)
+    {
+        var match = Regex.Match(output, @"Bugcheck code\s+([0-9A-Fa-f]{1,16})\b",
+            RegexOptions.IgnoreCase);
+        if (!match.Success)
+            return null;
+
+        var code = Convert.ToUInt64(match.Groups[1].Value, 16);
+        return code != 0 ? (true, $"0x{code:X8}") : (false, null);
+    }
+
+    public static (bool IsBugcheck, string? BugcheckCode) ParseLastEventFallback(string output)
+    {
+        var match = Regex.Match(output, @"Bug\s*check\s+([0-9A-Fa-f]{1,16})\b",
+            RegexOptions.IgnoreCase);
+        if (!match.Success)
+            return (false, null);
+
+        var code = Convert.ToUInt64(match.Groups[1].Value, 16);
+        return code != 0 ? (true, $"0x{code:X8}") : (false, null);
     }
 
     // ═══════════════════════════════════════════════════════════════
