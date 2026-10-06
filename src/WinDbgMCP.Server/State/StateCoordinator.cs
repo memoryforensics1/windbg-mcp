@@ -32,6 +32,7 @@ public sealed class StateCoordinator
     public Func<DebugExecutionStatus>? GetDbgEngExecutionStatus { get; set; }
     public Func<bool>? IsDbgEngConnected { get; set; }
     public Func<int>? GetPendingEventCount { get; set; }
+    public Func<Task<(bool IsBugcheck, string? BugcheckCode)>>? DetectBugcheckAsync { get; set; }
 
     // User-mode debug state delegates
     public Func<bool>? IsFridaAttached { get; set; }
@@ -137,12 +138,28 @@ public sealed class StateCoordinator
         // 2. Event queue count
         _state.PendingEventCount = GetPendingEventCount?.Invoke() ?? 0;
 
-        // 2.5 BSOD detection — only re-check when transitioning INTO break state
+        // 2.5 BSOD detection — check once when transitioning INTO break state
         if (_state.KdConnected && _state.KdExecStatus == DebugExecutionStatus.Break
             && !_bsodCheckedForCurrentBreak)
         {
             _bsodCheckedForCurrentBreak = true;
-            // BSOD detection happens in KernelDebugTools (kd_break, kd_wait_for_event)
+            if (DetectBugcheckAsync != null)
+            {
+                try
+                {
+                    var (isBugcheck, bugcheckCode) = await DetectBugcheckAsync();
+                    if (isBugcheck)
+                    {
+                        _state.IsBugcheck = true;
+                        _state.BugcheckCode = bugcheckCode;
+                        _logger.LogWarning("BSOD detected during state refresh: {Code}", bugcheckCode);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogDebug(ex, "BSOD detection failed during state refresh");
+                }
+            }
         }
         else if (_state.KdExecStatus != DebugExecutionStatus.Break)
         {
