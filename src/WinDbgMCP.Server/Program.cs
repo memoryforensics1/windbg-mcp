@@ -21,6 +21,9 @@ builder.Configuration.AddJsonFile(Path.Combine(exeDir, "appsettings.json"), opti
 builder.Logging.AddConsole(options =>
 {
     options.LogToStandardErrorThreshold = LogLevel.Trace;
+    // Debug-event logging runs inside DbgEng callbacks; never let a full
+    // stderr queue block the engine thread if the client stops draining it.
+    options.QueueFullMode = Microsoft.Extensions.Logging.Console.ConsoleLoggerQueueFullMode.DropWrite;
 });
 
 // Bind configuration
