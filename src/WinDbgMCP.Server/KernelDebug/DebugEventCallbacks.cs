@@ -19,6 +19,7 @@ public sealed class DebugEventCallbacks : DebugBaseEventCallbacks
     private volatile bool _hasBreakingEvent;
     private volatile bool _rebootDetected;
     private volatile bool _breakInPending;
+    private volatile bool _secondChancePending;
     private long _breakInAddress;
 
     private const uint StatusBreakpoint = 0x80000003;
@@ -43,6 +44,10 @@ public sealed class DebugEventCallbacks : DebugBaseEventCallbacks
     /// </summary>
     public bool HasBreakingEvent => _hasBreakingEvent;
     public bool RebootDetected => _rebootDetected;
+
+    /// <summary>True while the target sits at an unhandled (second-chance) exception.</summary>
+    public bool SecondChancePending => _secondChancePending;
+    public void ClearSecondChancePending() => _secondChancePending = false;
 
     public void ClearBreakingEventFlag() => _hasBreakingEvent = false;
     public void ClearRebootFlag() => _rebootDetected = false;
@@ -106,6 +111,7 @@ public sealed class DebugEventCallbacks : DebugBaseEventCallbacks
     public override DEBUG_STATUS Breakpoint(IntPtr bp)
     {
         _hasBreakingEvent = true;
+        _secondChancePending = false;
 
         string details = "Breakpoint hit";
         ulong? address = null;
@@ -129,16 +135,39 @@ public sealed class DebugEventCallbacks : DebugBaseEventCallbacks
         return DEBUG_STATUS.BREAK;
     }
 
+    // A managed exception escaping a COM callback is swallowed by the CCW and the
+    // event is silently lost, so every callback body is guarded.
     public override unsafe DEBUG_STATUS Exception(ref EXCEPTION_RECORD64 exception, int firstChance)
     {
+        try
+        {
+            return ExceptionCore(ref exception, firstChance);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Exception callback failed");
+            _hasBreakingEvent = true;
+            Enqueue(new DebugEvent
+            {
+                Type = DebugEventKind.Error,
+                Details = $"Exception callback failed ({ex.GetType().Name}: {ex.Message}); target halted for inspection"
+            });
+            return DEBUG_STATUS.BREAK;
+        }
+    }
+
+    private unsafe DEBUG_STATUS ExceptionCore(ref EXCEPTION_RECORD64 exception, int firstChance)
+    {
+        var code = (uint)exception.ExceptionCode;
         _logger.LogInformation(
             "DbgEng event: Exception code=0x{Code:X8} firstChance={First} params={Params} info0=0x{Info0:X} at 0x{Addr:X16}",
-            (uint)exception.ExceptionCode, firstChance, exception.NumberParameters,
+            code, firstChance, exception.NumberParameters,
             exception.NumberParameters > 0 ? exception.ExceptionInformation[0] : 0,
             exception.ExceptionAddress);
 
         if (firstChance != 0)
         {
+            _secondChancePending = false;
             if ((uint)exception.ExceptionCode == StatusBreakpoint)
             {
                 // Every kernel break-in (kd_break, the pump's yield, a BSOD, a
@@ -158,13 +187,12 @@ public sealed class DebugEventCallbacks : DebugBaseEventCallbacks
             // Pass them to the kernel (don't break, don't flag) but queue them as
             // informational so an NT_ASSERT — or, with +soe, any fault — is visible.
             // Single-step traps are the engine's own stepping.
-            var code = (uint)exception.ExceptionCode;
             if (code != StatusSingleStep && code != StatusWow64Breakpoint && code != StatusWow64SingleStep)
             {
                 Enqueue(new DebugEvent
                 {
                     Type = DebugEventKind.ExceptionFirstChance,
-                    Details = $"First-chance exception 0x{(uint)exception.ExceptionCode:X8} at " +
+                    Details = $"First-chance exception 0x{code:X8} at " +
                               $"0x{exception.ExceptionAddress:X16} (informational, kernel is handling it)",
                     Address = (ulong)exception.ExceptionAddress
                 });
@@ -172,13 +200,17 @@ public sealed class DebugEventCallbacks : DebugBaseEventCallbacks
             return DEBUG_STATUS.GO_NOT_HANDLED;
         }
 
-        // Second-chance (unhandled) exception — this is a real crash/BSOD.
+        // Second-chance (unhandled) exception: the kernel found no handler. The
+        // next kd_continue must pass it back unhandled (gn) so the kernel proceeds
+        // to KeBugCheckEx; a plain GO re-executes the faulting instruction forever.
         _hasBreakingEvent = true;
+        _secondChancePending = true;
         Enqueue(new DebugEvent
         {
             Type = DebugEventKind.ExceptionSecondChance,
-            Details = $"Exception 0x{exception.ExceptionCode:X8} at 0x{exception.ExceptionAddress:X16} " +
-                      "(second chance)",
+            Details = $"Unhandled exception 0x{code:X8} at 0x{exception.ExceptionAddress:X16} (second chance). " +
+                      "The kernel has no handler for it: kd_execute('k') to see the faulting stack; " +
+                      "kd_continue passes it back unhandled, which bugchecks the OS",
             Address = (ulong)exception.ExceptionAddress
         });
 

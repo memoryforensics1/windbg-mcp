@@ -1,6 +1,8 @@
 using System.ComponentModel;
+using System.Text.RegularExpressions;
 using ModelContextProtocol.Server;
 using WinDbgMCP.Server.Guest;
+using WinDbgMCP.Server.KernelDebug;
 using WinDbgMCP.Server.State;
 
 namespace WinDbgMCP.Server.Tools;
@@ -17,6 +19,7 @@ public static class GuestTools
     public static Task<string> GuestRunCommand(
         StateCoordinator state,
         GuestExecManager guest,
+        DbgEngManager dbgEng,
         [Description("Command to execute (runs via cmd.exe /c)")] string command,
         [Description("Working directory inside the guest (optional)")] string? workingDirectory = null,
         [Description("Timeout in seconds (default 60)")] int timeoutSeconds = 60,
@@ -24,10 +27,25 @@ public static class GuestTools
     {
         return state.RunToolAsync("guest_run_command", async () =>
         {
+            // A graceful restart never re-attaches to an existing KD session and
+            // leaves the engine stuck for good, so detach before letting it happen.
+            var note = "";
+            if (state.State.KdConnected && RestartCommand.IsMatch(command))
+            {
+                try { await dbgEng.DisconnectAsync(); } catch { state.CleanupKdSession?.Invoke(); }
+                state.SetKdDisconnected();
+                note = "Kernel debugger detached before the guest restart (a graceful restart does not " +
+                       "re-attach to an existing session). Call kd_connect once the OS is back up.\n";
+            }
+
             var result = await guest.RunCommandAsync(command, workingDirectory, timeoutSeconds, ct);
-            return result.ToString();
+            return note + result;
         });
     }
+
+    private static readonly Regex RestartCommand = new(
+        @"(^|[\s&|;])(shutdown(\.exe)?\s+(?=.*(/|-)[rsg]\b)|Restart-Computer\b|Stop-Computer\b)",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
     [McpServerTool(Name = "guest_transfer_to_vm"), Description(
         "Copy a file from the host machine to the guest VM. " +

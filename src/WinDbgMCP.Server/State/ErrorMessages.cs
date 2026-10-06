@@ -75,9 +75,9 @@ public static class ErrorMessages
     public const string BsodRecoveryOptions =
         "Options: (1) kd_execute('!analyze -v') to analyze the crash. " +
         "(2) kd_continue to let the crash run its course: the kernel writes the dump and " +
-        "breaks in a second time (kd_wait_for_event shows a Bugcheck event; BSOD state is " +
-        "re-flagged), kd_continue again and the VM reboots; get_system_state then shows " +
-        "TARGET REBOOTED at the initial breakpoint, and a final kd_continue boots the OS. " +
+        "reboots (some targets break in a second time first — then kd_wait_for_event shows " +
+        "another Bugcheck event and kd_continue again); kd_wait_for_event / get_system_state " +
+        "then show TARGET REBOOTED at the initial breakpoint, and a final kd_continue boots the OS. " +
         "(3) vm_snapshot_restore to revert to a clean state. " +
         "(4) vm_stop(hard=true) + vm_start if the target never comes back (auto-reboot disabled).";
 
@@ -93,11 +93,12 @@ public static class ErrorMessages
 
     public static string BsodContinueWarning(string? bugcheckCode) =>
         $"WARNING: target was halted at a BSOD (Bugcheck {bugcheckCode ?? "unknown"}). " +
-        "Expected sequence now: the kernel runs bugcheck callbacks and writes the crash dump, " +
-        "then breaks in a SECOND time (kd_wait_for_event reports a Bugcheck event and the BSOD " +
-        "is flagged again — that is normal, not a failed continue). kd_continue once more and " +
-        "the VM reboots; get_system_state then shows TARGET REBOOTED at the initial breakpoint " +
-        "and a final kd_continue boots the OS. If nothing happens for ~2 minutes the VM has " +
+        "Expected sequence now: the kernel runs bugcheck callbacks, writes the crash dump " +
+        "(typically 30-60 s) and reboots. Call kd_wait_for_event(90): it returns TARGET REBOOTED " +
+        "at the initial breakpoint, then kd_continue boots the OS (get_system_state shows the " +
+        "state at any point). Some targets break in a SECOND " +
+        "time before rebooting (another Bugcheck event, BSOD flagged again — that is normal, not a " +
+        "failed continue): just kd_continue once more. If nothing happens for ~2 minutes the VM has " +
         "auto-reboot disabled and is halted for good: use vm_stop(hard=true) + vm_start, " +
         "or vm_snapshot_restore.";
 }

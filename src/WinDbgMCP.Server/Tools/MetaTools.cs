@@ -43,6 +43,13 @@ public static class MetaTools
                     sb.AppendLine($"   Previous state (and any earlier BSOD) is gone.");
                     if (s.KdExecStatus == DebugExecutionStatus.Break)
                         sb.AppendLine($"   The debugger reconnected at the initial breakpoint; call kd_continue to let the OS finish booting.");
+                    else if (s.VmTools == VmToolsState.Running)
+                    {
+                        sb.AppendLine($"   The OS has booted (VMware Tools is up) but the kernel did NOT re-attach to this debugger");
+                        sb.AppendLine($"   session (this is what a graceful restart does). The engine cannot recover from this in-process:");
+                        sb.AppendLine($"   kernel-debug tools need an MCP server restart; guest/VM tools keep working.");
+                        sb.AppendLine($"   Next time call kd_disconnect BEFORE restarting the guest (guest_run_command does this for 'shutdown /r').");
+                    }
                     else
                     {
                         sb.AppendLine($"   The debugger is waiting for the target to come back; poll get_system_state.");

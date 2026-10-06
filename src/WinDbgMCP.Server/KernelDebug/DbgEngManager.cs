@@ -31,6 +31,15 @@ public sealed class DbgEngManager : IDisposable
     // data block is unavailable
     private volatile bool _interruptRequested;
 
+    // Interrupt timers are periodic: a break-in request sent while the kernel is
+    // busy (e.g. the module-load flood right after a reboot) is silently dropped,
+    // and with a one-shot timer WaitForEvent(INFINITE) would then never return.
+    private const int InterruptRetryMs = 2000;
+    private const int PumpYieldMs = 5000;
+
+    // E_PENDING: WaitForEvent returned because of SetInterrupt(DEBUG_INTERRUPT_EXIT)
+    private static readonly HRESULT WaitExited = (HRESULT)0x8000000AU;
+
     private const long DbgStatusControlC = 1;
     private const long DbgStatusBugcheckFirst = 3;
     private const long DbgStatusBugcheckSecond = 4;
@@ -69,7 +78,31 @@ public sealed class DbgEngManager : IDisposable
     /// </summary>
     public async Task<string> ConnectKernelAsync(string? connectionString = null, CancellationToken ct = default)
     {
-        var timeout = TimeSpan.FromSeconds(_config.Timeouts.KdConnectSeconds);
+        // The work item covers attach + the initial-break wait; the outer timeout
+        // must not expire first or the target is left halted behind a live client.
+        var timeout = TimeSpan.FromSeconds(_config.Timeouts.KdConnectSeconds + _config.Timeouts.KdInitialBreakSeconds + 15);
+
+        if (_engineWedged)
+            throw new InvalidOperationException(EngineWedgedMessage);
+
+        // A stale client's pump may be parked in a target-less wait: try to free the
+        // thread, and if it does not answer, report the engine as wedged.
+        if (_client != null)
+        {
+            ExitWait();
+            try
+            {
+                await _thread.ExecuteAsync(() => { }, ThreadGrabTimeout);
+            }
+            catch (OperationCanceledException)
+            {
+                if (!EngineHasNoDebuggee)
+                    throw new InvalidOperationException(
+                        "The engine thread is busy with the previous session; call kd_disconnect first, then kd_connect.");
+                MarkEngineWedged();
+                throw new InvalidOperationException(EngineWedgedMessage);
+            }
+        }
 
         return await _thread.ExecuteAsync(() =>
         {
@@ -168,12 +201,8 @@ public sealed class DbgEngManager : IDisposable
 
             _logger.LogInformation("AttachKernel succeeded, waiting for initial breakpoint...");
 
-            // WaitForEvent for live kernel targets MUST use INFINITE timeout
-            // (per Microsoft docs). Use SetInterrupt from a timer as safety net.
-            var waitTimeoutMs = _config.Timeouts.KdInitialBreakSeconds * 1000;
-            using var interruptTimer = new Timer(_ => RequestInterrupt(), null, waitTimeoutMs, Timeout.Infinite);
-
-            var waitHr = _client.Control.TryWaitForEvent(DEBUG_WAIT.DEFAULT, unchecked((int)0xFFFFFFFF));
+            var initialBreakMs = _config.Timeouts.KdInitialBreakSeconds * 1000;
+            var waitHr = WaitForEventInterruptible(initialBreakMs, initialBreakMs, breakInEarly: false);
 
             if (waitHr == HRESULT.S_OK)
             {
@@ -181,15 +210,14 @@ public sealed class DbgEngManager : IDisposable
                 ReadBreakWithStatusAddress();
                 ClassifyPendingBreakIn();
 
-                // Force reload symbols
-                _outputCapture.Clear();
-                _client.Control.TryExecute(DEBUG_OUTCTL.THIS_CLIENT, ".reload /f", DEBUG_EXECUTE.DEFAULT);
-                _outputCapture.GetAndClear(); // Discard reload output
+                // No eager ".reload /f": symbols load lazily on first use, and a slow
+                // symbol server here once pushed kd_connect past its timeout, leaving
+                // the target halted with a live client the coordinator didn't know about.
 
                 return $"Connected to kernel via {transport}. Target is at initial breakpoint. " +
                        "You can now use kd_execute to run WinDbg commands, or kd_continue to resume.";
             }
-            else if (waitHr == HRESULT.S_FALSE)
+            else if (WaitAbandoned(waitHr))
             {
                 // Timeout — target is running but we're connected
                 _logger.LogInformation("Connected. Target is running (no initial break within timeout).");
@@ -219,52 +247,101 @@ public sealed class DbgEngManager : IDisposable
             return "Not connected.";
 
         // Step 1: If target is at BREAK, resume it by setting GO and letting
-        // the event pump dispatch it. For kernel targets, WaitForEvent MUST use
-        // INFINITE timeout — a finite timeout returns immediately without
-        // dispatching. The pump already handles this correctly with its
-        // INFINITE + interrupt timer pattern.
-        var needsResume = await _thread.ExecuteAsync(() =>
+        // the event pump dispatch it (kernel targets need INFINITE waits, and the
+        // pump's wait is where the GO is dispatched).
+        bool needsResume;
+        try
         {
-            if (_client == null) return false;
-
-            try
+            ExitWait();
+            // Must outlast the pump's yield period, which is the only thing that
+            // frees the thread while a live target is running.
+            needsResume = await _thread.ExecuteAsync(() =>
             {
-                var status = _client.Control.ExecutionStatus;
-                if (status == DEBUG_STATUS.BREAK)
+                if (_client == null) return false;
+
+                try
                 {
-                    _client.Control.TrySetExecutionStatus(DEBUG_STATUS.GO);
-                    _thread.PumpEnabled = true;
-                    return true;
+                    var status = _client.Control.ExecutionStatus;
+                    if (status == DEBUG_STATUS.BREAK)
+                    {
+                        _client.Control.TrySetExecutionStatus(DEBUG_STATUS.GO);
+                        _thread.PumpEnabled = true;
+                        return true;
+                    }
                 }
-            }
-            catch { }
-            return false;
-        }, TimeSpan.FromSeconds(5));
+                catch { }
+                return false;
+            }, ThreadGrabTimeout);
+        }
+        catch (OperationCanceledException)
+        {
+            if (!EngineHasNoDebuggee)
+                return "kd_disconnect could not get hold of the engine thread in time; the target is still " +
+                       "attached. Try kd_disconnect again.";
+            MarkEngineWedged();
+            return "Disconnected. " + EngineWedgedMessage;
+        }
 
         if (needsResume)
         {
             // Give the pump time to dispatch the GO via WaitForEvent(INFINITE).
-            // The pump uses a 1s interrupt timer cycle, so 3s is plenty.
             await Task.Delay(3000);
         }
 
-        // Step 2: Disconnect. The pump will yield to this work item
-        // within ~1s when its interrupt timer fires.
-        return await _thread.ExecuteAsync(() =>
+        // Step 2: Disconnect (EXIT again in case the pump re-entered its wait).
+        ExitWait();
+
+        try
         {
-            _thread.PumpEnabled = false;
-
-            try
+            return await _thread.ExecuteAsync(() =>
             {
-                _client?.TryEndSession(DEBUG_END.ACTIVE_DETACH);
-            }
-            catch { }
+                _thread.PumpEnabled = false;
 
-            _client = null;
-            _logger.LogInformation("Disconnected from kernel debugger.");
-            return "Disconnected from kernel debugger. Target has been resumed.";
-        }, TimeSpan.FromSeconds(10));
+                try
+                {
+                    _client?.TryEndSession(DEBUG_END.ACTIVE_DETACH);
+                }
+                catch { }
+
+                _client = null;
+                _logger.LogInformation("Disconnected from kernel debugger.");
+                return "Disconnected from kernel debugger. Target has been resumed.";
+            }, ThreadGrabTimeout + TimeSpan.FromSeconds(5));
+        }
+        catch (OperationCanceledException)
+        {
+            if (!EngineHasNoDebuggee)
+                return "kd_disconnect could not get hold of the engine thread in time; the target may still " +
+                       "be attached. Call get_system_state, then try kd_disconnect again.";
+            MarkEngineWedged();
+            return "Disconnected. " + EngineWedgedMessage;
+        }
     }
+
+    private bool EngineHasNoDebuggee => _eventCallbacks.LastExecutionStatus == DEBUG_STATUS.NO_DEBUGGEE;
+    private static readonly TimeSpan ThreadGrabTimeout = TimeSpan.FromMilliseconds(PumpYieldMs + 5000);
+
+    /// <summary>
+    /// Ends the session from the calling (non-engine) thread. DEBUG_END_REENTRANT
+    /// is the one EndSession mode documented as callable while WaitForEvent is
+    /// running on the engine thread; it makes that wait return so the thread is
+    /// usable again. The pump then stops without raising an Error event.
+    /// </summary>
+    private void ForceEndSession()
+    {
+        _forcedEnd = true;
+        try
+        {
+            var hr = _client?.TryEndSession(DEBUG_END.END_REENTRANT);
+            _logger.LogWarning("Forced reentrant EndSession -> {Hr}", hr);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Forced reentrant EndSession threw");
+        }
+    }
+
+    private volatile bool _forcedEnd;
 
     // ═══════════════════════════════════════════════════════════════
     //  STATE QUERY
@@ -357,13 +434,9 @@ public sealed class DbgEngManager : IDisposable
                 throw;
             }
 
-            // Wait for the break to take effect (INFINITE + interrupt timer for kernel targets)
-            var breakTimeoutMs = _config.Timeouts.KdBreakSeconds * 1000;
-            using var interruptTimer = new Timer(_ => RequestInterrupt(), null, breakTimeoutMs, Timeout.Infinite);
-
-            var waitHr = _client.Control.TryWaitForEvent(
-                DEBUG_WAIT.DEFAULT,
-                unchecked((int)0xFFFFFFFF));
+            // A break-in sent while the kernel is busy is silently dropped, so
+            // re-send it on every wait slice until the target halts or we time out.
+            var waitHr = WaitForEventInterruptible(InterruptRetryMs, _config.Timeouts.KdBreakSeconds * 1000, breakInEarly: true);
 
             if (waitHr == HRESULT.S_OK)
             {
@@ -380,8 +453,12 @@ public sealed class DbgEngManager : IDisposable
             }
             else
             {
-                return "SetInterrupt sent but target did not break within timeout. " +
-                       "The target may be in a non-interruptible state. Try again or check get_system_state.";
+                // Target never answered the break-in (busy, rebooting, or the kernel
+                // booted without re-attaching). Keep watching it rather than wedge.
+                _thread.PumpEnabled = true;
+                return "Break-in sent repeatedly but the target did not halt within the timeout. " +
+                       "It may be rebooting, booting without the debugger attached, or non-interruptible. " +
+                       "Check get_system_state; if it says the kernel did not re-attach, kd_disconnect then kd_connect.";
             }
         }, timeout + TimeSpan.FromSeconds(2));
     }
@@ -400,8 +477,18 @@ public sealed class DbgEngManager : IDisposable
 
             _eventCallbacks.ClearBreakingEventFlag();
             _eventCallbacks.ClearRebootFlag();
-            _client.Control.TrySetExecutionStatus(DEBUG_STATUS.GO);
+
+            // At a second-chance exception a plain GO re-executes the faulting
+            // instruction and the same exception comes straight back. GO_NOT_HANDLED
+            // (WinDbg's gn) hands it to the kernel, which has no handler and bugchecks.
+            var unhandled = _eventCallbacks.SecondChancePending;
+            _eventCallbacks.ClearSecondChancePending();
+            _client.Control.TrySetExecutionStatus(unhandled ? DEBUG_STATUS.GO_NOT_HANDLED : DEBUG_STATUS.GO);
             _thread.PumpEnabled = true;
+
+            if (unhandled)
+                return "Target resumed with the unhandled exception passed back to the kernel (gn). " +
+                       "Expect a BSOD next: call kd_wait_for_event to catch the bugcheck break-in.";
 
             return "Target resumed. Guest operations are now available. " +
                    "If you set breakpoints, call kd_wait_for_event to check for hits, " +
@@ -431,13 +518,8 @@ public sealed class DbgEngManager : IDisposable
 
             _client.Control.TrySetExecutionStatus(status);
 
-            // Wait for step to complete (INFINITE + interrupt timer for kernel targets)
-            var stepTimeoutMs = _config.Timeouts.KdStepSeconds * 1000;
-            using var interruptTimer = new Timer(_ => RequestInterrupt(), null, stepTimeoutMs, Timeout.Infinite);
-
-            var waitHr = _client.Control.TryWaitForEvent(
-                DEBUG_WAIT.DEFAULT,
-                unchecked((int)0xFFFFFFFF));
+            var stepMs = _config.Timeouts.KdStepSeconds * 1000;
+            var waitHr = WaitForEventInterruptible(stepMs, stepMs, breakInEarly: false);
 
             if (waitHr == HRESULT.S_OK)
             {
@@ -458,10 +540,11 @@ public sealed class DbgEngManager : IDisposable
             }
             else
             {
-                return $"Step {mode} timed out. The instruction may have caused a long-running " +
-                       "operation. Call kd_break to interrupt, or kd_wait_for_event to continue waiting.";
+                _thread.PumpEnabled = true;
+                return $"Step {mode} timed out; the target is still running. The instruction may have " +
+                       "caused a long-running operation. Call kd_break to interrupt, or kd_wait_for_event to continue waiting.";
             }
-        }, timeout + TimeSpan.FromSeconds(2));
+        }, timeout + TimeSpan.FromSeconds(10));
     }
 
     /// <summary>
@@ -495,13 +578,10 @@ public sealed class DbgEngManager : IDisposable
                        "Use kd_execute to inspect state, or kd_continue to resume.";
             }
 
-            // INFINITE timeout + interrupt timer for kernel targets
-            var waitTimeoutMs = timeoutSeconds * 1000;
-            using var interruptTimer = new Timer(_ => RequestInterrupt(), null, waitTimeoutMs, Timeout.Infinite);
-
-            var waitHr = _client.Control.TryWaitForEvent(
-                DEBUG_WAIT.DEFAULT,
-                unchecked((int)0xFFFFFFFF));
+            // At the timeout a break-in halts the target (resumed below) and EXIT is
+            // sent as well, so the thread comes back whether or not a target exists.
+            var waitMs = timeoutSeconds * 1000;
+            var waitHr = WaitForEventInterruptible(waitMs, waitMs, breakInEarly: false);
 
             if (waitHr == HRESULT.S_OK)
                 ClassifyPendingBreakIn();
@@ -518,14 +598,23 @@ public sealed class DbgEngManager : IDisposable
 
             if (waitHr == HRESULT.S_OK)
             {
-                // Our own timeout interrupt halted the target — resume it so the
-                // "no event" answer is true. The pump dispatches the GO.
+                // A stray break-in (e.g. the pump's last yield) halted the target —
+                // resume it so the "no event" answer is true. The pump dispatches the GO.
                 _client.Control.TrySetExecutionStatus(DEBUG_STATUS.GO);
+            }
+
+            if (waitHr == HRESULT.S_OK || WaitAbandoned(waitHr))
+            {
                 _thread.PumpEnabled = true;
-                return $"No debug event received within {timeoutSeconds}s. Target is still running. " +
-                       "You can: (1) Call kd_wait_for_event again to keep waiting, " +
-                       "(2) Call kd_break to manually halt the target, or " +
-                       "(3) Proceed with guest operations while the target runs.";
+                var noTarget = _eventCallbacks.LastExecutionStatus == DEBUG_STATUS.NO_DEBUGGEE;
+                return noTarget
+                    ? $"No debug event received within {timeoutSeconds}s and the engine has no debuggee: the target " +
+                      "is rebooting or booted without re-attaching. Check get_system_state (it says which); " +
+                      "if the OS is up, kd_disconnect then kd_connect."
+                    : $"No debug event received within {timeoutSeconds}s. Target is still running. " +
+                      "You can: (1) Call kd_wait_for_event again to keep waiting, " +
+                      "(2) Call kd_break to manually halt the target, or " +
+                      "(3) Proceed with guest operations while the target runs.";
             }
 
             _logger.LogWarning("kd_wait_for_event: WaitForEvent returned {Hr}", waitHr);
@@ -617,13 +706,18 @@ public sealed class DbgEngManager : IDisposable
     {
         if (_client == null) return;
 
-        // For kernel targets, WaitForEvent must use INFINITE.
-        // Use an interrupt timer to periodically yield so the DbgEng thread
-        // can process work items (tool calls). 5s balances responsiveness
-        // with minimizing target micro-freezes.
-        using var interruptTimer = new Timer(_ => RequestInterrupt(), null, 5000, Timeout.Infinite);
+        // Live kernel targets only support INFINITE waits. A periodic ACTIVE
+        // break-in yields the thread every few seconds so queued tool calls run
+        // (no-op while the engine has no debuggee: an interrupt during the KDNET
+        // reconnect handshake makes the kernel retry it). If the target never
+        // comes back this wait cannot be woken; see ReplaceEngineThread.
+        using var interruptTimer = new Timer(_ => RequestInterrupt(), null, PumpYieldMs, PumpYieldMs);
 
         var hr = _client.Control.TryWaitForEvent(DEBUG_WAIT.DEFAULT, unchecked((int)0xFFFFFFFF));
+        _logger.LogInformation("Pump: WaitForEvent returned {Hr}, status={Status}", hr, _eventCallbacks.LastExecutionStatus);
+
+        if (hr == WaitExited)
+            return; // a tool asked the wait to exit so its work item can run
 
         if (hr == HRESULT.S_OK)
         {
@@ -645,6 +739,12 @@ public sealed class DbgEngManager : IDisposable
             }
             // If status is still GO, it was just our interrupt to yield — keep pumping
         }
+        else if (_forcedEnd)
+        {
+            _logger.LogInformation("Event pump released by forced EndSession ({Hr})", hr);
+            _forcedEnd = false;
+            _thread.PumpEnabled = false;
+        }
         else
         {
             _logger.LogWarning("Event pump WaitForEvent failed with {Hr}; pump stopped", hr);
@@ -658,11 +758,88 @@ public sealed class DbgEngManager : IDisposable
     //  BREAK-IN CLASSIFICATION
     // ═══════════════════════════════════════════════════════════════
 
+    /// <summary>
+    /// INFINITE WaitForEvent (a finite timeout is E_NOTIMPL on live kernel targets —
+    /// verified) driven by a periodic timer: from <paramref name="firstMs"/> on it
+    /// sends ACTIVE break-ins every <see cref="InterruptRetryMs"/> (a request sent
+    /// while the kernel is busy is dropped, so one shot is not enough); once
+    /// <paramref name="deadlineMs"/> has passed it also sends EXIT. With
+    /// <paramref name="breakInEarly"/> false, nothing is sent before the deadline.
+    /// Returns S_OK on an event, S_FALSE / E_PENDING when the wait was abandoned.
+    /// </summary>
+    private HRESULT WaitForEventInterruptible(int firstMs, int deadlineMs, bool breakInEarly)
+    {
+        var started = Environment.TickCount64;
+        using var timer = new Timer(_ =>
+        {
+            var pastDeadline = Environment.TickCount64 - started >= deadlineMs;
+            if (breakInEarly || pastDeadline)
+                RequestInterrupt();
+            if (pastDeadline)
+                ExitWait();
+        }, null, firstMs, InterruptRetryMs);
+
+        return _client!.Control.TryWaitForEvent(DEBUG_WAIT.DEFAULT, unchecked((int)0xFFFFFFFF));
+    }
+
+    private static bool WaitAbandoned(HRESULT hr) => hr == HRESULT.S_FALSE || hr == WaitExited;
+
+    /// <summary>
+    /// The engine thread is parked in a target-less INFINITE wait (the kernel
+    /// restarted gracefully and never re-attached). Nothing wakes that wait —
+    /// SetInterrupt(EXIT), EndSession(REENTRANT) and a replacement thread/client
+    /// were all tried live; dbgeng is process-global and the stuck session owns it.
+    /// Record the fact so every kernel tool fails fast with an honest message.
+    /// </summary>
+    public const string EngineWedgedMessage =
+        "The kernel debugger engine is stuck waiting for a target that never re-attached " +
+        "(the guest restarted gracefully while the debugger was connected). Kernel-debug tools " +
+        "are unavailable until the MCP server process is restarted; guest/VM tools still work. " +
+        "To avoid this, call kd_disconnect before restarting the guest.";
+
+    public bool EngineWedged => _engineWedged;
+    private volatile bool _engineWedged;
+
+    private void MarkEngineWedged()
+    {
+        _logger.LogError("Engine thread is wedged in a target-less wait; kernel tools disabled until restart");
+        _engineWedged = true;
+        ForceEndSession();
+        _client = null;
+        _eventCallbacks.EnqueueError(EngineWedgedMessage);
+    }
+
+    private void ExitWait()
+    {
+        try
+        {
+            var hr = _client?.Control.TrySetInterrupt(DEBUG_INTERRUPT.EXIT);
+            _logger.LogInformation("SetInterrupt(EXIT) -> {Hr}", hr);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "SetInterrupt(EXIT) threw");
+        }
+    }
+
     private void RequestInterrupt()
     {
+        // While the engine has no debuggee (target rebooting / reconnecting) any
+        // interrupt disturbs the KDNET handshake; the initial breakpoint arrives on
+        // its own once the kernel is back. Runs 2 and 4 reconnected cleanly this way.
+        if (_eventCallbacks.LastExecutionStatus == DEBUG_STATUS.NO_DEBUGGEE)
+            return;
+
         _interruptRequested = true;
-        try { _client?.Control.SetInterrupt(DEBUG_INTERRUPT.ACTIVE); }
-        catch { }
+        try
+        {
+            var hr = _client?.Control.TrySetInterrupt(DEBUG_INTERRUPT.ACTIVE);
+            _logger.LogInformation("SetInterrupt -> {Hr} (rebootDetected={Reboot})", hr, _eventCallbacks.RebootDetected);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "SetInterrupt threw");
+        }
     }
 
     /// <summary>
@@ -776,7 +953,7 @@ public sealed class DbgEngManager : IDisposable
                         ? "BSOD: second bugcheck break-in (crash dump written). kd_continue should reboot the VM; " +
                           "if it keeps breaking here, use vm_stop(hard=true) + vm_start"
                         : "BSOD: kernel entered the bugcheck handler. Run kd_execute('!analyze -v') now; " +
-                          "kd_continue proceeds to the crash dump and reboot",
+                          "kd_continue proceeds to the crash dump and reboot (then kd_wait_for_event for TARGET REBOOTED)",
                     Address = address
                 });
                 return;

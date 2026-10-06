@@ -65,18 +65,22 @@ public enum KdTransport
 }
 
 /// <summary>
-/// Maps directly to DEBUG_STATUS_* constants from dbgeng.h.
+/// Maps directly to DEBUG_STATUS_* constants from dbgeng.h (verified against
+/// the engine: NO_DEBUGGEE is 7, not 0).
 /// </summary>
 public enum DebugExecutionStatus
 {
-    NoDebuggee = 0,       // DEBUG_STATUS_NO_DEBUGGEE
+    NoChange = 0,         // DEBUG_STATUS_NO_CHANGE
     Go = 1,               // DEBUG_STATUS_GO
-    StepInto = 2,         // DEBUG_STATUS_STEP_INTO
-    StepOver = 3,         // DEBUG_STATUS_STEP_OVER
-    StepBranch = 4,       // DEBUG_STATUS_STEP_BRANCH
+    GoHandled = 2,        // DEBUG_STATUS_GO_HANDLED
+    GoNotHandled = 3,     // DEBUG_STATUS_GO_NOT_HANDLED
+    StepOver = 4,         // DEBUG_STATUS_STEP_OVER
+    StepInto = 5,         // DEBUG_STATUS_STEP_INTO
     Break = 6,            // DEBUG_STATUS_BREAK
-    GoHandled = 7,        // DEBUG_STATUS_GO_HANDLED
-    GoNotHandled = 8,     // DEBUG_STATUS_GO_NOT_HANDLED
+    NoDebuggee = 7,       // DEBUG_STATUS_NO_DEBUGGEE
+    StepBranch = 8,       // DEBUG_STATUS_STEP_BRANCH
+    IgnoreEvent = 9,      // DEBUG_STATUS_IGNORE_EVENT
+    RestartRequested = 10,// DEBUG_STATUS_RESTART_REQUESTED
     Uninitialized = -1    // Our own: DbgEng not loaded yet
 }
 
