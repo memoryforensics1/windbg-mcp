@@ -25,6 +25,7 @@ public enum DebugEventKind
     ThreadCreated,
     ThreadExited,
     BreakIn,
+    Bugcheck,
     SystemError,
     SessionEnded,
     TargetRebooted,

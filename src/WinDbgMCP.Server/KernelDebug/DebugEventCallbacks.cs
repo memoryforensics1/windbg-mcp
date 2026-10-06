@@ -16,6 +16,12 @@ public sealed class DebugEventCallbacks : DebugBaseEventCallbacks
     private volatile bool _hasBreakingEvent;
     private volatile bool _rebootDetected;
 
+    private const uint StatusBreakpoint = 0x80000003;
+    private const long DbgStatusControlC = 1;
+    private const long DbgStatusBugcheckFirst = 3;
+    private const long DbgStatusBugcheckSecond = 4;
+    private const long DbgStatusFatal = 5;
+
     public int PendingCount => _eventQueue.Count;
     public DEBUG_STATUS LastExecutionStatus => _lastExecutionStatus;
 
@@ -74,9 +80,11 @@ public sealed class DebugEventCallbacks : DebugBaseEventCallbacks
     {
         if (firstChance != 0)
         {
-            // First-chance exceptions are routine in a running kernel.
+            if ((uint)exception.ExceptionCode == StatusBreakpoint)
+                return HandleBreakIn(ref exception);
+
+            // Other first-chance exceptions are routine in a running kernel.
             // Let the kernel handle them — don't break or set the flag.
-            // The engine will continue waiting for the next event.
             return DEBUG_STATUS.GO_NOT_HANDLED;
         }
 
@@ -91,6 +99,47 @@ public sealed class DebugEventCallbacks : DebugBaseEventCallbacks
         });
 
         return DEBUG_STATUS.BREAK;
+    }
+
+    // Every kernel break-in (Ctrl+Break, our yield interrupt, a BSOD, a driver's
+    // DbgBreakPoint) arrives as first-chance STATUS_BREAKPOINT. The kernel passes
+    // the reason in ExceptionInformation[0] (DBG_STATUS_* from DbgBreakPointWithStatus).
+    private unsafe DEBUG_STATUS HandleBreakIn(ref EXCEPTION_RECORD64 exception)
+    {
+        long reason = exception.NumberParameters > 0 ? exception.ExceptionInformation[0] : 0;
+        var address = (ulong)exception.ExceptionAddress;
+
+        switch (reason)
+        {
+            case DbgStatusControlC:
+                // Debugger-initiated (kd_break or the pump's yield). Let the engine's
+                // default handling break; don't flag it as a target event.
+                return DEBUG_STATUS.NO_CHANGE;
+
+            case DbgStatusBugcheckFirst:
+            case DbgStatusBugcheckSecond:
+            case DbgStatusFatal:
+                _hasBreakingEvent = true;
+                _eventQueue.Enqueue(new DebugEvent
+                {
+                    Type = DebugEventKind.Bugcheck,
+                    Details = reason == DbgStatusBugcheckSecond
+                        ? "BSOD: bugcheck callbacks ran, kernel is about to reboot/halt"
+                        : "BSOD: kernel entered bugcheck handler",
+                    Address = address
+                });
+                return DEBUG_STATUS.BREAK;
+
+            default:
+                _hasBreakingEvent = true;
+                _eventQueue.Enqueue(new DebugEvent
+                {
+                    Type = DebugEventKind.BreakIn,
+                    Details = $"Break instruction (int 3) at 0x{address:X16}, status {reason}",
+                    Address = address
+                });
+                return DEBUG_STATUS.BREAK;
+        }
     }
 
     public override DEBUG_STATUS LoadModule(
