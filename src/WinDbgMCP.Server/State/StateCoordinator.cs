@@ -123,6 +123,7 @@ public sealed class StateCoordinator
             var drained = DrainDebugEvents?.Invoke();
             if (drained != null)
                 _pendingEvents.AddRange(drained);
+            _state.PendingEventCount = GetPendingEventCount?.Invoke() ?? 0;
         }
         catch (Exception ex)
         {

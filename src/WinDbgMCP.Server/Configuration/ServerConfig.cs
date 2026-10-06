@@ -18,9 +18,9 @@ public sealed class NotificationsConfig
 {
     /// <summary>
     /// Push important debug events (BSOD, breakpoint, break-in, reboot, lost session)
-    /// to the MCP client as notifications/message as they happen. This reaches the
-    /// client's log, not the model — the model learns about events from the banner
-    /// on its next tool result regardless of this setting.
+    /// to the MCP client as notifications/message as they happen. In current clients
+    /// this reaches the client's log, not the model — the model learns about events
+    /// from the banner on its next tool result regardless of this setting.
     /// </summary>
     public bool PushDebugEvents { get; set; } = true;
 }

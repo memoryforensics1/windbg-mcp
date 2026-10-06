@@ -23,6 +23,8 @@ public sealed class DebugEventCallbacks : DebugBaseEventCallbacks
 
     private const uint StatusBreakpoint = 0x80000003;
     private const uint StatusSingleStep = 0x80000004;
+    private const uint StatusWow64Breakpoint = 0x4000001F;
+    private const uint StatusWow64SingleStep = 0x4000001E;
     private const int RecentEventCapacity = 20;
     private readonly ConcurrentQueue<DebugEvent> _recentEvents = new();
 
@@ -44,11 +46,9 @@ public sealed class DebugEventCallbacks : DebugBaseEventCallbacks
 
     public void ClearBreakingEventFlag() => _hasBreakingEvent = false;
     public void ClearRebootFlag() => _rebootDetected = false;
-    public void ClearEvents()
-    {
-        _eventQueue.Clear();
-        _recentEvents.Clear();
-    }
+    // The recent-events ring deliberately survives a reconnect: the
+    // SessionEnded/TargetRebooted history is exactly what is worth re-reading.
+    public void ClearEvents() => _eventQueue.Clear();
 
     /// <summary>
     /// Invoked on the DbgEng thread for every queued event (push notifications).
@@ -152,11 +152,14 @@ public sealed class DebugEventCallbacks : DebugBaseEventCallbacks
                 return DEBUG_STATUS.NO_CHANGE;
             }
 
-            // Other first-chance exceptions are routine in a running kernel.
-            // Let the kernel handle them — don't break or set the flag — but queue
-            // them as informational so the LLM still sees e.g. a driver's first
-            // access violation. Single-step traps are the engine's own stepping.
-            if ((uint)exception.ExceptionCode != StatusSingleStep)
+            // The kernel only forwards first-chance exceptions to KD for a few
+            // codes (NT_ASSERT 0xC0000420, WoW64 breakpoints/single-steps) unless
+            // `!gflag +soe` is set; an unhandled driver fault arrives second-chance.
+            // Pass them to the kernel (don't break, don't flag) but queue them as
+            // informational so an NT_ASSERT — or, with +soe, any fault — is visible.
+            // Single-step traps are the engine's own stepping.
+            var code = (uint)exception.ExceptionCode;
+            if (code != StatusSingleStep && code != StatusWow64Breakpoint && code != StatusWow64SingleStep)
             {
                 Enqueue(new DebugEvent
                 {

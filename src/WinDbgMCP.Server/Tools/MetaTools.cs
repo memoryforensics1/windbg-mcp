@@ -64,14 +64,14 @@ public static class MetaTools
 
                 sb.AppendLine($"Pending Events:    {s.PendingEventCount}");
                 sb.AppendLine($"Wait Pending:      {s.KdWaitPending}");
+            }
 
-                var recent = state.GetRecentDebugEvents?.Invoke() ?? new();
-                if (recent.Count > 0)
-                {
-                    sb.AppendLine($"Recent Events (already reported, oldest first, last {recent.Count}):");
-                    foreach (var evt in recent)
-                        sb.AppendLine($"   {evt}");
-                }
+            var recent = state.GetRecentDebugEvents?.Invoke() ?? new();
+            if (recent.Count > 0)
+            {
+                sb.AppendLine($"Recent Debug Events (already reported, oldest first, last {recent.Count}):");
+                foreach (var evt in recent)
+                    sb.AppendLine($"   {evt}");
             }
             sb.AppendLine();
 

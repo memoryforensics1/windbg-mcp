@@ -114,6 +114,10 @@ builder.Services
             Version = "1.0.0-alpha"
         };
         options.ServerInstructions = BuildServerInstructions(config);
+        // McpEventNotifier sends notifications/message; the spec requires the
+        // capability to be declared. Mutate rather than replace — the SDK fills Tools.
+        options.Capabilities ??= new();
+        options.Capabilities.Logging = new();
     })
     .WithStdioServerTransport()
     .WithTools(toolTypes);

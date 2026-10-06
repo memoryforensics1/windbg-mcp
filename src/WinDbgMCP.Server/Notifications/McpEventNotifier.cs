@@ -83,6 +83,10 @@ public sealed class McpEventNotifier : IHostedService
                 _ => LoggingLevel.Notice,
             };
 
+            // Honour the client's logging/setLevel (null = client never set one)
+            if (server.LoggingLevel is { } minimum && level < minimum)
+                return;
+
             await server.SendNotificationAsync(
                 NotificationMethods.LoggingMessageNotification,
                 new LoggingMessageNotificationParams
