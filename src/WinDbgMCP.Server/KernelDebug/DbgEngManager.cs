@@ -42,6 +42,13 @@ public sealed class DbgEngManager : IDisposable
     public List<DebugEvent> DrainEvents() => _eventCallbacks.DrainEvents();
     public List<DebugEvent> RecentEvents => _eventCallbacks.RecentEvents;
 
+    /// <summary>Called on the DbgEng thread for every queued event; must not block.</summary>
+    public Action<DebugEvent>? EventRaised
+    {
+        get => _eventCallbacks.EventRaised;
+        set => _eventCallbacks.EventRaised = value;
+    }
+
     public DbgEngManager(DbgEngThread thread, ServerConfig config, ILogger<DbgEngManager> logger)
     {
         _thread = thread;

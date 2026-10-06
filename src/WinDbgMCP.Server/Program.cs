@@ -6,6 +6,7 @@ using ModelContextProtocol.Server;
 using WinDbgMCP.Server.Configuration;
 using WinDbgMCP.Server.Guest;
 using WinDbgMCP.Server.KernelDebug;
+using WinDbgMCP.Server.Notifications;
 using WinDbgMCP.Server.State;
 using WinDbgMCP.Server.Tools;
 using WinDbgMCP.Server.UserModeDebug;
@@ -41,6 +42,9 @@ builder.Services.AddSingleton<DbgEngManager>();
 
 // Guest execution manager
 builder.Services.AddSingleton<GuestExecManager>();
+
+// Push important debug events to the MCP client (Notifications.PushDebugEvents)
+builder.Services.AddHostedService<McpEventNotifier>();
 
 // User-mode debug managers
 builder.Services.AddSingleton<FridaManager>();

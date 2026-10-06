@@ -50,8 +50,21 @@ public sealed class DebugEventCallbacks : DebugBaseEventCallbacks
         _recentEvents.Clear();
     }
 
+    /// <summary>
+    /// Invoked on the DbgEng thread for every queued event (push notifications).
+    /// Must never throw or block.
+    /// </summary>
+    public Action<DebugEvent>? EventRaised { get; set; }
+
+    private void Enqueue(DebugEvent evt)
+    {
+        _eventQueue.Enqueue(evt);
+        try { EventRaised?.Invoke(evt); }
+        catch (Exception ex) { _logger.LogDebug(ex, "EventRaised handler failed"); }
+    }
+
     public void EnqueueError(string details) =>
-        _eventQueue.Enqueue(new DebugEvent { Type = DebugEventKind.Error, Details = details });
+        Enqueue(new DebugEvent { Type = DebugEventKind.Error, Details = details });
 
     /// <summary>
     /// Records a breaking event classified outside the callback (see
@@ -60,7 +73,7 @@ public sealed class DebugEventCallbacks : DebugBaseEventCallbacks
     public void RecordBreakingEvent(DebugEvent evt)
     {
         _hasBreakingEvent = true;
-        _eventQueue.Enqueue(evt);
+        Enqueue(evt);
     }
 
     /// <summary>
@@ -107,7 +120,7 @@ public sealed class DebugEventCallbacks : DebugBaseEventCallbacks
         catch { }
 
         _logger.LogInformation("DbgEng event: {Details}", details);
-        _eventQueue.Enqueue(new DebugEvent
+        Enqueue(new DebugEvent
         {
             Type = DebugEventKind.BreakpointHit,
             Details = details,
@@ -145,7 +158,7 @@ public sealed class DebugEventCallbacks : DebugBaseEventCallbacks
             // access violation. Single-step traps are the engine's own stepping.
             if ((uint)exception.ExceptionCode != StatusSingleStep)
             {
-                _eventQueue.Enqueue(new DebugEvent
+                Enqueue(new DebugEvent
                 {
                     Type = DebugEventKind.ExceptionFirstChance,
                     Details = $"First-chance exception 0x{(uint)exception.ExceptionCode:X8} at " +
@@ -158,7 +171,7 @@ public sealed class DebugEventCallbacks : DebugBaseEventCallbacks
 
         // Second-chance (unhandled) exception — this is a real crash/BSOD.
         _hasBreakingEvent = true;
-        _eventQueue.Enqueue(new DebugEvent
+        Enqueue(new DebugEvent
         {
             Type = DebugEventKind.ExceptionSecondChance,
             Details = $"Exception 0x{exception.ExceptionCode:X8} at 0x{exception.ExceptionAddress:X16} " +
@@ -173,7 +186,7 @@ public sealed class DebugEventCallbacks : DebugBaseEventCallbacks
         long imageFileHandle, long baseOffset, int moduleSize,
         string moduleName, string imageName, int checkSum, int timeDateStamp)
     {
-        _eventQueue.Enqueue(new DebugEvent
+        Enqueue(new DebugEvent
         {
             Type = DebugEventKind.ModuleLoaded,
             Details = $"Module loaded: {moduleName ?? imageName} at 0x{baseOffset:X16}",
@@ -184,7 +197,7 @@ public sealed class DebugEventCallbacks : DebugBaseEventCallbacks
 
     public override DEBUG_STATUS UnloadModule(string imageBaseName, long baseOffset)
     {
-        _eventQueue.Enqueue(new DebugEvent
+        Enqueue(new DebugEvent
         {
             Type = DebugEventKind.ModuleUnloaded,
             Details = $"Module unloaded: {imageBaseName} from 0x{baseOffset:X16}",
@@ -198,7 +211,7 @@ public sealed class DebugEventCallbacks : DebugBaseEventCallbacks
         string moduleName, string imageName, int checkSum, int timeDateStamp,
         long initialThreadHandle, long threadDataOffset, long startOffset)
     {
-        _eventQueue.Enqueue(new DebugEvent
+        Enqueue(new DebugEvent
         {
             Type = DebugEventKind.ProcessCreated,
             Details = $"Process created: {moduleName ?? imageName}"
@@ -208,7 +221,7 @@ public sealed class DebugEventCallbacks : DebugBaseEventCallbacks
 
     public override DEBUG_STATUS ExitProcess(int exitCode)
     {
-        _eventQueue.Enqueue(new DebugEvent
+        Enqueue(new DebugEvent
         {
             Type = DebugEventKind.ProcessExited,
             Details = $"Process exited with code {exitCode}"
@@ -230,7 +243,7 @@ public sealed class DebugEventCallbacks : DebugBaseEventCallbacks
     {
         _logger.LogInformation("DbgEng event: SystemError error=0x{Error:X8} level={Level}", error, level);
         _hasBreakingEvent = true;
-        _eventQueue.Enqueue(new DebugEvent
+        Enqueue(new DebugEvent
         {
             Type = DebugEventKind.SystemError,
             Details = $"System error: 0x{error:X8}, level {level}"
@@ -243,7 +256,7 @@ public sealed class DebugEventCallbacks : DebugBaseEventCallbacks
         _logger.LogInformation("DbgEng event: SessionStatus {Status}", status);
         if (status == DEBUG_SESSION.END || status == DEBUG_SESSION.FAILURE)
         {
-            _eventQueue.Enqueue(new DebugEvent
+            Enqueue(new DebugEvent
             {
                 Type = DebugEventKind.SessionEnded,
                 Details = status == DEBUG_SESSION.FAILURE
@@ -257,7 +270,7 @@ public sealed class DebugEventCallbacks : DebugBaseEventCallbacks
             // the initial breakpoint. Mark it as a breaking event so the pump stops.
             _rebootDetected = true;
             _hasBreakingEvent = true;
-            _eventQueue.Enqueue(new DebugEvent
+            Enqueue(new DebugEvent
             {
                 Type = DebugEventKind.TargetRebooted,
                 Details = "Target rebooted. Previous kernel state is gone; " +
