@@ -23,6 +23,7 @@ public class StateCoordinatorTests : IDisposable
     private string? _fridaTarget = null;
     private bool _dbgsrvConnected = false;
     private uint? _dbgsrvPid = null;
+    private bool _rebootDetected = false;
 
     public StateCoordinatorTests()
     {
@@ -45,6 +46,7 @@ public class StateCoordinatorTests : IDisposable
         _coordinator.GetFridaTargetName = () => _fridaTarget;
         _coordinator.IsDbgsrvConnected = () => _dbgsrvConnected;
         _coordinator.GetDbgsrvAttachedPid = () => _dbgsrvPid;
+        _coordinator.IsRebootDetected = () => _rebootDetected;
     }
 
     public void Dispose() { }
@@ -620,6 +622,37 @@ public class StateCoordinatorTests : IDisposable
         await _coordinator.RefreshStateAsync();
 
         Assert.False(_coordinator.State.KdConnected);
+    }
+
+    [Fact]
+    public async Task RefreshState_RebootClearsStaleBugcheck()
+    {
+        SetVmRunning();
+        SetKdConnectedBroken();
+        _coordinator.SetBsodDetected("0x7E");
+
+        _rebootDetected = true;
+        await _coordinator.RefreshStateAsync();
+
+        var state = _coordinator.State;
+        Assert.True(state.KdRebootDetected);
+        Assert.False(state.IsBugcheck);
+        Assert.Null(state.BugcheckCode);
+        Assert.True(state.KdConnected);
+    }
+
+    [Fact]
+    public async Task RefreshState_RebootFlagClearsWhenEngineClearsIt()
+    {
+        SetVmRunning();
+        SetKdConnectedBroken();
+        _rebootDetected = true;
+        await _coordinator.RefreshStateAsync();
+        Assert.True(_coordinator.State.KdRebootDetected);
+
+        _rebootDetected = false;
+        await _coordinator.RefreshStateAsync();
+        Assert.False(_coordinator.State.KdRebootDetected);
     }
 
     [Fact]

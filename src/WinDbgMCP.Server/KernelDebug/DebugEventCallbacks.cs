@@ -14,6 +14,7 @@ public sealed class DebugEventCallbacks : DebugBaseEventCallbacks
     private readonly ConcurrentQueue<DebugEvent> _eventQueue = new();
     private volatile DEBUG_STATUS _lastExecutionStatus = DEBUG_STATUS.NO_DEBUGGEE;
     private volatile bool _hasBreakingEvent;
+    private volatile bool _rebootDetected;
 
     public int PendingCount => _eventQueue.Count;
     public DEBUG_STATUS LastExecutionStatus => _lastExecutionStatus;
@@ -24,8 +25,11 @@ public sealed class DebugEventCallbacks : DebugBaseEventCallbacks
     /// real events from yield interrupts.
     /// </summary>
     public bool HasBreakingEvent => _hasBreakingEvent;
+    public bool RebootDetected => _rebootDetected;
 
     public void ClearBreakingEventFlag() => _hasBreakingEvent = false;
+    public void ClearRebootFlag() => _rebootDetected = false;
+    public void ClearEvents() => _eventQueue.Clear();
 
     public override HRESULT GetInterestMask(out DEBUG_EVENT_TYPE mask)
     {
@@ -159,6 +163,27 @@ public sealed class DebugEventCallbacks : DebugBaseEventCallbacks
 
     public override HRESULT SessionStatus(DEBUG_SESSION status)
     {
+        if (status == DEBUG_SESSION.END)
+        {
+            _eventQueue.Enqueue(new DebugEvent
+            {
+                Type = DebugEventKind.SessionEnded,
+                Details = "Debug session ended"
+            });
+        }
+        else if (status == DEBUG_SESSION.REBOOT)
+        {
+            // The engine reconnects on its own after a kernel reboot and halts at
+            // the initial breakpoint. Mark it as a breaking event so the pump stops.
+            _rebootDetected = true;
+            _hasBreakingEvent = true;
+            _eventQueue.Enqueue(new DebugEvent
+            {
+                Type = DebugEventKind.TargetRebooted,
+                Details = "Target rebooted. Previous kernel state is gone; " +
+                          "debugger reconnects at the initial breakpoint."
+            });
+        }
         return HRESULT.S_OK;
     }
 

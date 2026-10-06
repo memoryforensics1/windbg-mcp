@@ -24,6 +24,9 @@ public sealed class SystemState
     public bool IsBugcheck { get; set; }
     public string? BugcheckCode { get; set; }
 
+    // Target rebooted since the last kd_continue; engine reconnected at the initial breakpoint
+    public bool KdRebootDetected { get; set; }
+
     // === Guest Exec Layer ===
     /// <summary>
     /// Derived: VmPower==Running AND VmTools==Running AND KdExecStatus!=Break

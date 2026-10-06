@@ -27,6 +27,7 @@ public sealed class DbgEngManager : IDisposable
 
     public bool IsConnected => _client != null;
     public int PendingEventCount => _eventCallbacks.PendingCount;
+    public bool RebootDetected => _eventCallbacks.RebootDetected;
 
     public DbgEngManager(DbgEngThread thread, ServerConfig config, ILogger<DbgEngManager> logger)
     {
@@ -80,6 +81,9 @@ public sealed class DbgEngManager : IDisposable
                 throw new InvalidOperationException($"DebugCreate failed: {hr}");
 
             _client = new DebugClient(pClient);
+            _eventCallbacks.ClearEvents();
+            _eventCallbacks.ClearBreakingEventFlag();
+            _eventCallbacks.ClearRebootFlag();
 
             // Set callbacks
             _client.OutputCallbacks = _outputCapture;
@@ -350,6 +354,7 @@ public sealed class DbgEngManager : IDisposable
                 throw new InvalidOperationException("Not connected.");
 
             _eventCallbacks.ClearBreakingEventFlag();
+            _eventCallbacks.ClearRebootFlag();
             _client.Control.TrySetExecutionStatus(DEBUG_STATUS.GO);
             _thread.PumpEnabled = true;
 
@@ -592,6 +597,8 @@ public sealed class DbgEngManager : IDisposable
     {
         _thread.PumpEnabled = false;
         _client = null;
+        _eventCallbacks.ClearEvents();
+        _eventCallbacks.ClearRebootFlag();
         // _disposed intentionally NOT set — manager remains usable
     }
 

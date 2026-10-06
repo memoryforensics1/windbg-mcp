@@ -33,6 +33,7 @@ public sealed class StateCoordinator
     public Func<bool>? IsDbgEngConnected { get; set; }
     public Func<int>? GetPendingEventCount { get; set; }
     public Func<Task<(bool IsBugcheck, string? BugcheckCode)>>? DetectBugcheckAsync { get; set; }
+    public Func<bool>? IsRebootDetected { get; set; }
 
     // User-mode debug state delegates
     public Func<bool>? IsFridaAttached { get; set; }
@@ -133,6 +134,19 @@ public sealed class StateCoordinator
                 _state.IsBugcheck = false;
                 _state.BugcheckCode = null;
             }
+
+            // 1.5 Reboot detection — the old kernel (and any BSOD it was in) is gone,
+            // so the new break must be re-evaluated from scratch.
+            var rebooted = IsRebootDetected?.Invoke() ?? false;
+            if (rebooted && !_state.KdRebootDetected)
+            {
+                _logger.LogWarning("Target reboot detected; kernel state reset");
+                _state.IsBugcheck = false;
+                _state.BugcheckCode = null;
+                _state.KdBreakReason = "Target rebooted";
+                _bsodCheckedForCurrentBreak = false;
+            }
+            _state.KdRebootDetected = rebooted;
         }
 
         // 2. Event queue count
@@ -299,6 +313,7 @@ public sealed class StateCoordinator
         _state.KdWaitPending = false;
         _state.IsBugcheck = false;
         _state.BugcheckCode = null;
+        _state.KdRebootDetected = false;
     }
 
     /// <summary>
