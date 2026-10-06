@@ -496,6 +496,8 @@ public sealed class StateCoordinator
         _state.IsBugcheck = false;
         _state.BugcheckCode = null;
         _state.KdRebootDetected = false;
+        // A reconnect to a still-crashed target must probe again
+        _bsodCheckedForCurrentBreak = false;
     }
 
     /// <summary>
