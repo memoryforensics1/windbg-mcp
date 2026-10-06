@@ -335,7 +335,18 @@ public sealed class DbgEngManager : IDisposable
             // Deliberately not RequestInterrupt(): a SetInterrupt failure must throw
             // here rather than let WaitForEvent(INFINITE) wedge the engine thread.
             _interruptRequested = true;
-            _client.Control.SetInterrupt(DEBUG_INTERRUPT.ACTIVE);
+            try
+            {
+                _client.Control.SetInterrupt(DEBUG_INTERRUPT.ACTIVE);
+            }
+            catch
+            {
+                // Target is still running and nobody is in WaitForEvent — put the
+                // pump back so a later breakpoint/BSOD is still caught.
+                _interruptRequested = false;
+                _thread.PumpEnabled = true;
+                throw;
+            }
 
             // Wait for the break to take effect (INFINITE + interrupt timer for kernel targets)
             var breakTimeoutMs = _config.Timeouts.KdBreakSeconds * 1000;
@@ -654,6 +665,7 @@ public sealed class DbgEngManager : IDisposable
     private void ReadBreakWithStatusAddress()
     {
         if (_client == null) return;
+        var previous = _breakWithStatusAddr;
         var buffer = Marshal.AllocHGlobal(8);
         try
         {
@@ -671,7 +683,9 @@ public sealed class DbgEngManager : IDisposable
         {
             Marshal.FreeHGlobal(buffer);
         }
-        _logger.LogInformation("BreakpointWithStatus address: 0x{Addr:X16}", _breakWithStatusAddr);
+        if (_breakWithStatusAddr != previous)
+            _logger.LogInformation("BreakpointWithStatus address: 0x{Addr:X16} (was 0x{Prev:X16})",
+                _breakWithStatusAddr, previous);
     }
 
     /// <summary>
