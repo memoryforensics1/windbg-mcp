@@ -55,7 +55,8 @@ public static class VmTools
                 // don't surface later as unexpected SessionEnded/Error alerts.
                 if (state.State.KdConnected)
                 {
-                    try { await dbgEng.DisconnectAsync(); } catch { }
+                    try { await dbgEng.DisconnectAsync(); }
+                    catch { state.CleanupKdSession?.Invoke(); } // drop the client; the VM is going away anyway
                     state.SetKdDisconnected();
                 }
 
