@@ -44,10 +44,24 @@ public sealed class DebugEventCallbacks : DebugBaseEventCallbacks
     public override DEBUG_STATUS Breakpoint(IntPtr bp)
     {
         _hasBreakingEvent = true;
+
+        string details = "Breakpoint hit";
+        ulong? address = null;
+        try
+        {
+            var breakpoint = new DebugBreakpoint(bp);
+            var id = breakpoint.Id;
+            var offset = breakpoint.Offset;
+            details = $"Breakpoint {id} hit at 0x{offset:X16}";
+            address = (ulong)offset;
+        }
+        catch { }
+
         _eventQueue.Enqueue(new DebugEvent
         {
             Type = DebugEventKind.BreakpointHit,
-            Details = "Breakpoint hit"
+            Details = details,
+            Address = address
         });
         return DEBUG_STATUS.BREAK;
     }
