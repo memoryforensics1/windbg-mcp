@@ -332,7 +332,10 @@ public sealed class DbgEngManager : IDisposable
 
             _thread.PumpEnabled = false;
 
-            RequestInterrupt();
+            // Deliberately not RequestInterrupt(): a SetInterrupt failure must throw
+            // here rather than let WaitForEvent(INFINITE) wedge the engine thread.
+            _interruptRequested = true;
+            _client.Control.SetInterrupt(DEBUG_INTERRUPT.ACTIVE);
 
             // Wait for the break to take effect (INFINITE + interrupt timer for kernel targets)
             var breakTimeoutMs = _config.Timeouts.KdBreakSeconds * 1000;
@@ -688,7 +691,9 @@ public sealed class DbgEngManager : IDisposable
         var interruptRequested = _interruptRequested;
         _interruptRequested = false;
 
-        if (_breakWithStatusAddr == 0)
+        // KASLR relocates ntoskrnl on every boot, so a cached address is stale after
+        // a reboot. Re-read on any mismatch before concluding "target code".
+        if (_breakWithStatusAddr == 0 || address != _breakWithStatusAddr)
             ReadBreakWithStatusAddress();
 
         // DbgBreakPointWithStatus(Status) is "int 3; ret" on x64 — the status is
