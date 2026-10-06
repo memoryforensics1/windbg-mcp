@@ -16,7 +16,8 @@ public static class MetaTools
         StateCoordinator state,
         CancellationToken ct = default)
     {
-        await state.RefreshStateAsync();
+        // Refresh under the coordinator lock so it doesn't race another tool's precheck
+        await state.ValidatePreconditionsAsync("get_system_state");
         var s = state.State;
 
         var sb = new StringBuilder();

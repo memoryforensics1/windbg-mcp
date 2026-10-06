@@ -152,16 +152,22 @@ public sealed class StateCoordinator
         // 2. Event queue count
         _state.PendingEventCount = GetPendingEventCount?.Invoke() ?? 0;
 
-        // 2.5 BSOD detection — check once when transitioning INTO break state
+        // 2.5 BSOD detection — check once when transitioning INTO break state.
+        // Skipped if a tool already flagged the bugcheck. A failed check (e.g. the
+        // DbgEng thread was busy and the 5s timeout hit) is retried on the next refresh.
         if (_state.KdConnected && _state.KdExecStatus == DebugExecutionStatus.Break
-            && !_bsodCheckedForCurrentBreak)
+            && !_bsodCheckedForCurrentBreak && !_state.IsBugcheck)
         {
-            _bsodCheckedForCurrentBreak = true;
-            if (DetectBugcheckAsync != null)
+            if (DetectBugcheckAsync == null)
+            {
+                _bsodCheckedForCurrentBreak = true;
+            }
+            else
             {
                 try
                 {
                     var (isBugcheck, bugcheckCode) = await DetectBugcheckAsync();
+                    _bsodCheckedForCurrentBreak = true;
                     if (isBugcheck)
                     {
                         _state.IsBugcheck = true;
@@ -171,7 +177,7 @@ public sealed class StateCoordinator
                 }
                 catch (Exception ex)
                 {
-                    _logger.LogDebug(ex, "BSOD detection failed during state refresh");
+                    _logger.LogDebug(ex, "BSOD detection failed during state refresh; will retry");
                 }
             }
         }

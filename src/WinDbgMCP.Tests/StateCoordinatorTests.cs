@@ -24,6 +24,7 @@ public class StateCoordinatorTests : IDisposable
     private bool _dbgsrvConnected = false;
     private uint? _dbgsrvPid = null;
     private bool _rebootDetected = false;
+    private Func<Task<(bool, string?)>>? _detectBugcheck = null;
 
     public StateCoordinatorTests()
     {
@@ -47,6 +48,8 @@ public class StateCoordinatorTests : IDisposable
         _coordinator.IsDbgsrvConnected = () => _dbgsrvConnected;
         _coordinator.GetDbgsrvAttachedPid = () => _dbgsrvPid;
         _coordinator.IsRebootDetected = () => _rebootDetected;
+        _coordinator.DetectBugcheckAsync = () =>
+            _detectBugcheck?.Invoke() ?? Task.FromResult((false, (string?)null));
     }
 
     public void Dispose() { }
@@ -622,6 +625,58 @@ public class StateCoordinatorTests : IDisposable
         await _coordinator.RefreshStateAsync();
 
         Assert.False(_coordinator.State.KdConnected);
+    }
+
+    [Fact]
+    public async Task RefreshState_DetectsBugcheckOnBreak()
+    {
+        SetVmRunning();
+        SetKdConnectedBroken();
+        var calls = 0;
+        _detectBugcheck = () => { calls++; return Task.FromResult((true, (string?)"0xD1")); };
+
+        await _coordinator.RefreshStateAsync();
+        await _coordinator.RefreshStateAsync();
+
+        Assert.True(_coordinator.State.IsBugcheck);
+        Assert.Equal("0xD1", _coordinator.State.BugcheckCode);
+        Assert.Equal(1, calls);
+    }
+
+    [Fact]
+    public async Task RefreshState_RetriesBugcheckCheckAfterFailure()
+    {
+        SetVmRunning();
+        SetKdConnectedBroken();
+        var calls = 0;
+        _detectBugcheck = () =>
+        {
+            calls++;
+            if (calls == 1) throw new TaskCanceledException();
+            return Task.FromResult((true, (string?)"0x7E"));
+        };
+
+        await _coordinator.RefreshStateAsync();
+        Assert.False(_coordinator.State.IsBugcheck);
+
+        await _coordinator.RefreshStateAsync();
+        Assert.True(_coordinator.State.IsBugcheck);
+        Assert.Equal(2, calls);
+    }
+
+    [Fact]
+    public async Task RefreshState_SkipsBugcheckCheckWhenAlreadyFlagged()
+    {
+        SetVmRunning();
+        SetKdConnectedBroken();
+        _coordinator.SetBsodDetected("0x50");
+        var calls = 0;
+        _detectBugcheck = () => { calls++; return Task.FromResult((false, (string?)null)); };
+
+        await _coordinator.RefreshStateAsync();
+
+        Assert.True(_coordinator.State.IsBugcheck);
+        Assert.Equal(0, calls);
     }
 
     [Fact]

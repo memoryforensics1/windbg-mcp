@@ -494,18 +494,33 @@ public sealed class DbgEngManager : IDisposable
             if (_client == null)
                 return (false, (string?)null);
 
+            // .bugcheck reads KiBugCheckData, which is nonzero only once KeBugCheck
+            // has run. .lastevent for a live BSOD just says "Break instruction
+            // exception", so it is only a fallback if .bugcheck is unavailable.
+            _outputCapture.Clear();
+            _client.Control.TryExecute(
+                DEBUG_OUTCTL.THIS_CLIENT, ".bugcheck", DEBUG_EXECUTE.DEFAULT);
+            var bugcheckOutput = _outputCapture.GetAndClear();
+
+            var codeMatch = Regex.Match(bugcheckOutput, @"Bugcheck code\s+([0-9A-Fa-f]{1,16})",
+                RegexOptions.IgnoreCase);
+            if (codeMatch.Success)
+            {
+                var code = Convert.ToUInt64(codeMatch.Groups[1].Value, 16);
+                return code != 0
+                    ? (true, (string?)$"0x{code:X8}")
+                    : (false, (string?)null);
+            }
+
             _outputCapture.Clear();
             _client.Control.TryExecute(
                 DEBUG_OUTCTL.THIS_CLIENT, ".lastevent", DEBUG_EXECUTE.DEFAULT);
-            var output = _outputCapture.GetAndClear();
+            var lastEvent = _outputCapture.GetAndClear();
 
-            if (output.Contains("bugcheck", StringComparison.OrdinalIgnoreCase) ||
-                output.Contains("Bug Check", StringComparison.OrdinalIgnoreCase))
-            {
-                var match = Regex.Match(output, @"[Bb]ug\s*[Cc]heck\s+([\dA-Fa-f]+)");
-                var code = match.Success ? $"0x{match.Groups[1].Value}" : "unknown";
-                return (true, (string?)code);
-            }
+            var lastEventMatch = Regex.Match(lastEvent, @"Bug\s*check\s+([0-9A-Fa-f]+)",
+                RegexOptions.IgnoreCase);
+            if (lastEventMatch.Success)
+                return (true, (string?)$"0x{lastEventMatch.Groups[1].Value}");
 
             return (false, (string?)null);
         }, timeout);
