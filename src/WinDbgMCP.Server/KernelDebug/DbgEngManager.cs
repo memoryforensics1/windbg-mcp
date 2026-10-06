@@ -649,7 +649,7 @@ public sealed class DbgEngManager : IDisposable
     /// Reads nt!RtlpBreakWithStatusInstruction from the KdDebuggerDataBlock
     /// (no symbols needed). Every DbgBreakPointWithStatus break-in — Ctrl+Break,
     /// KeBugCheck, the initial breakpoint — traps at exactly this address with
-    /// the DBG_STATUS_* reason in RAX. This is how WinDbg tells them apart.
+    /// the DBG_STATUS_* reason in RCX (EAX on x86). This is how WinDbg tells them apart.
     /// </summary>
     private void ReadBreakWithStatusAddress()
     {
@@ -735,8 +735,8 @@ public sealed class DbgEngManager : IDisposable
             _ => "target break-in"
         };
         _logger.LogInformation(
-            "Break-in at 0x{Addr:X16} ({Source}): rcx=0x{Rcx:X} rax=0x{Rax:X} status={Status} interruptRequested={Req} -> {Decision}",
-            address, source, rcx ?? -1, rax ?? -1, status, interruptRequested, decision);
+            "Break-in at 0x{Addr:X16} ({Source}): arg=0x{Arg:X} rcx=0x{Rcx:X} rax=0x{Rax:X} status={Status} interruptRequested={Req} -> {Decision}",
+            address, source, argRegister ?? -1, rcx ?? -1, rax ?? -1, status, interruptRequested, decision);
 
         switch (status)
         {
@@ -764,7 +764,9 @@ public sealed class DbgEngManager : IDisposable
                     Type = DebugEventKind.BreakIn,
                     Details = status >= 0
                         ? $"DbgBreakPointWithStatus({status}) at 0x{address:X16}"
-                        : $"Break instruction in target code at 0x{address:X16} (DbgBreakPoint/__debugbreak)",
+                        : atBreakWithStatus
+                            ? $"DbgBreakPointWithStatus at 0x{address:X16}, status register unreadable — treated as a target break-in"
+                            : $"Break instruction in target code at 0x{address:X16} (DbgBreakPoint/__debugbreak)",
                     Address = address
                 });
                 return;

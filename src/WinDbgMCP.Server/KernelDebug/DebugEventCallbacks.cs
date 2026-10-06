@@ -123,7 +123,7 @@ public sealed class DebugEventCallbacks : DebugBaseEventCallbacks
             {
                 // Every kernel break-in (kd_break, the pump's yield, a BSOD, a
                 // driver's DbgBreakPoint) is a first-chance int 3. The reason is
-                // not in the exception record — it is in RAX when the address is
+                // not in the exception record — it is in RCX when the address is
                 // nt!RtlpBreakWithStatusInstruction — so the manager classifies it
                 // once WaitForEvent has returned. NO_CHANGE lets the engine's default
                 // break-instruction handling halt the target.
