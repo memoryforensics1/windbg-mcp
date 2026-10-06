@@ -93,6 +93,8 @@ public static class KernelDebugTools
             try
             {
                 var result = await dbgEng.BreakAsync();
+                if (!result.StartsWith("Target halted", StringComparison.Ordinal))
+                    return result;
 
                 // A probe failure must not be reported as a failed break; the state
                 // refresh retries the probe on the next tool call anyway.

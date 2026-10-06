@@ -42,6 +42,7 @@ public static class VmTools
     public static Task<string> VmStop(
         StateCoordinator state,
         VmwareManager vmware,
+        DbgEngManager dbgEng,
         [Description("If true, force power off. If false, attempt graceful shutdown (default: false)")] bool hard = false,
         CancellationToken ct = default)
     {
@@ -50,9 +51,13 @@ public static class VmTools
         {
             try
             {
-                // If KD is connected, note it will be lost
+                // Detach the kernel debugger first so the dying session's events
+                // don't surface later as unexpected SessionEnded/Error alerts.
                 if (state.State.KdConnected)
+                {
+                    try { await dbgEng.DisconnectAsync(); } catch { }
                     state.SetKdDisconnected();
+                }
 
                 var result = await vmware.StopAsync(hard, ct);
                 if (!result.Success)

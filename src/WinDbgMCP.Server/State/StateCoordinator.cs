@@ -200,7 +200,7 @@ public sealed class StateCoordinator
         sb.AppendLine((executed, relevantChange) switch
         {
             (true, _) => "- The call below ran after or during the above; read its result in that light.",
-            (false, true) => "- The call below was NOT executed: the state changed before it ran and its preconditions no longer hold — see the reason in its result.",
+            (false, true) => "- The call below was NOT executed, most likely because the state changed before it ran and its preconditions no longer hold — see the reason in its result.",
             (false, false) => "- The call below was NOT executed; see the reason in its result (unrelated to the informational events above).",
         });
         sb.Append("!!! END !!!");

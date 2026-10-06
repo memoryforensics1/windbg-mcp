@@ -952,6 +952,48 @@ public class StateCoordinatorTests : IDisposable
         Assert.DoesNotContain("VM POWER STATE CHANGED", result);
         Assert.Equal(VmPowerState.Off, _coordinator.State.VmPower);
         Assert.Equal(VmToolsState.Unknown, _coordinator.State.VmTools);
+
+        // Once the throttle expires the probe agrees with the recorded state: still no alert
+        await Task.Delay(2100);
+        var later = await _coordinator.RunToolAsync("vm_snapshot_list", () => Task.FromResult("list"));
+        Assert.DoesNotContain("VM POWER STATE CHANGED", later);
+    }
+
+    [Fact]
+    public async Task RunTool_BootTimeToolsNotRespondingIsNotAlerted()
+    {
+        SetVmOff();
+        await _coordinator.RefreshStateAsync();
+
+        _vmPower = VmPowerState.Running;
+        _toolsRunning = false;
+        var result = await _coordinator.RunToolAsync("vm_start", () =>
+        {
+            _coordinator.SetVmPowerChangedByTool(VmPowerState.Running);
+            return Task.FromResult("started");
+        });
+
+        Assert.DoesNotContain("VMWARE TOOLS STOPPED RESPONDING", result);
+        Assert.Equal(VmToolsState.NotResponding, _coordinator.State.VmTools);
+    }
+
+    [Fact]
+    public async Task RunTool_SetBsodProbedSkipsPostCallProbe()
+    {
+        SetVmRunning();
+        SetKdConnectedRunning();
+        await _coordinator.RefreshStateAsync();
+        var calls = 0;
+        _detectBugcheck = () => { calls++; return Task.FromResult((false, (string?)null)); };
+
+        await _coordinator.RunToolAsync("kd_break", () =>
+        {
+            _execStatus = DebugExecutionStatus.Break;
+            _coordinator.SetBsodProbed();
+            return Task.FromResult("Target halted.");
+        });
+
+        Assert.Equal(0, calls);
     }
 
     [Fact]
