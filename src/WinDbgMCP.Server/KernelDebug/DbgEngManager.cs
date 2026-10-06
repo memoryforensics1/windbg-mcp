@@ -25,6 +25,17 @@ public sealed class DbgEngManager : IDisposable
     private DebugClient? _client;
     private bool _disposed;
 
+    // nt!RtlpBreakWithStatusInstruction from the KdDebuggerDataBlock; 0 if unknown
+    private ulong _breakWithStatusAddr;
+    // Set before every SetInterrupt we issue; fallback discriminator when the
+    // data block is unavailable
+    private volatile bool _interruptRequested;
+
+    private const long DbgStatusControlC = 1;
+    private const long DbgStatusBugcheckFirst = 3;
+    private const long DbgStatusBugcheckSecond = 4;
+    private const long DbgStatusFatal = 5;
+
     public bool IsConnected => _client != null;
     public int PendingEventCount => _eventCallbacks.PendingCount;
     public bool RebootDetected => _eventCallbacks.RebootDetected;
@@ -148,17 +159,15 @@ public sealed class DbgEngManager : IDisposable
             // WaitForEvent for live kernel targets MUST use INFINITE timeout
             // (per Microsoft docs). Use SetInterrupt from a timer as safety net.
             var waitTimeoutMs = _config.Timeouts.KdInitialBreakSeconds * 1000;
-            using var interruptTimer = new Timer(_ =>
-            {
-                try { _client?.Control.SetInterrupt(DEBUG_INTERRUPT.ACTIVE); }
-                catch { }
-            }, null, waitTimeoutMs, Timeout.Infinite);
+            using var interruptTimer = new Timer(_ => RequestInterrupt(), null, waitTimeoutMs, Timeout.Infinite);
 
             var waitHr = _client.Control.TryWaitForEvent(DEBUG_WAIT.DEFAULT, unchecked((int)0xFFFFFFFF));
 
             if (waitHr == HRESULT.S_OK)
             {
                 _logger.LogInformation("Connected. Target at initial breakpoint.");
+                ReadBreakWithStatusAddress();
+                ClassifyPendingBreakIn();
 
                 // Force reload symbols
                 _outputCapture.Clear();
@@ -320,15 +329,11 @@ public sealed class DbgEngManager : IDisposable
 
             _thread.PumpEnabled = false;
 
-            _client.Control.SetInterrupt(DEBUG_INTERRUPT.ACTIVE);
+            RequestInterrupt();
 
             // Wait for the break to take effect (INFINITE + interrupt timer for kernel targets)
             var breakTimeoutMs = _config.Timeouts.KdBreakSeconds * 1000;
-            using var interruptTimer = new Timer(_ =>
-            {
-                try { _client?.Control.SetInterrupt(DEBUG_INTERRUPT.ACTIVE); }
-                catch { }
-            }, null, breakTimeoutMs, Timeout.Infinite);
+            using var interruptTimer = new Timer(_ => RequestInterrupt(), null, breakTimeoutMs, Timeout.Infinite);
 
             var waitHr = _client.Control.TryWaitForEvent(
                 DEBUG_WAIT.DEFAULT,
@@ -336,6 +341,8 @@ public sealed class DbgEngManager : IDisposable
 
             if (waitHr == HRESULT.S_OK)
             {
+                ClassifyPendingBreakIn();
+
                 // Get break reason
                 _outputCapture.Clear();
                 _client.Control.TryExecute(
@@ -400,11 +407,7 @@ public sealed class DbgEngManager : IDisposable
 
             // Wait for step to complete (INFINITE + interrupt timer for kernel targets)
             var stepTimeoutMs = _config.Timeouts.KdStepSeconds * 1000;
-            using var interruptTimer = new Timer(_ =>
-            {
-                try { _client?.Control.SetInterrupt(DEBUG_INTERRUPT.ACTIVE); }
-                catch { }
-            }, null, stepTimeoutMs, Timeout.Infinite);
+            using var interruptTimer = new Timer(_ => RequestInterrupt(), null, stepTimeoutMs, Timeout.Infinite);
 
             var waitHr = _client.Control.TryWaitForEvent(
                 DEBUG_WAIT.DEFAULT,
@@ -412,6 +415,8 @@ public sealed class DbgEngManager : IDisposable
 
             if (waitHr == HRESULT.S_OK)
             {
+                ClassifyPendingBreakIn();
+
                 // Show where we ended up
                 _outputCapture.Clear();
                 _client.Control.TryExecute(
@@ -466,15 +471,14 @@ public sealed class DbgEngManager : IDisposable
 
             // INFINITE timeout + interrupt timer for kernel targets
             var waitTimeoutMs = timeoutSeconds * 1000;
-            using var interruptTimer = new Timer(_ =>
-            {
-                try { _client?.Control.SetInterrupt(DEBUG_INTERRUPT.ACTIVE); }
-                catch { }
-            }, null, waitTimeoutMs, Timeout.Infinite);
+            using var interruptTimer = new Timer(_ => RequestInterrupt(), null, waitTimeoutMs, Timeout.Infinite);
 
             var waitHr = _client.Control.TryWaitForEvent(
                 DEBUG_WAIT.DEFAULT,
                 unchecked((int)0xFFFFFFFF));
+
+            if (waitHr == HRESULT.S_OK)
+                ClassifyPendingBreakIn();
 
             if (waitHr == HRESULT.S_OK && _eventCallbacks.HasBreakingEvent)
             {
@@ -590,16 +594,13 @@ public sealed class DbgEngManager : IDisposable
         // Use an interrupt timer to periodically yield so the DbgEng thread
         // can process work items (tool calls). 5s balances responsiveness
         // with minimizing target micro-freezes.
-        using var interruptTimer = new Timer(_ =>
-        {
-            try { _client?.Control.SetInterrupt(DEBUG_INTERRUPT.ACTIVE); }
-            catch { }
-        }, null, 5000, Timeout.Infinite);
+        using var interruptTimer = new Timer(_ => RequestInterrupt(), null, 5000, Timeout.Infinite);
 
         var hr = _client.Control.TryWaitForEvent(DEBUG_WAIT.DEFAULT, unchecked((int)0xFFFFFFFF));
 
         if (hr == HRESULT.S_OK)
         {
+            ClassifyPendingBreakIn();
             var status = _client.Control.ExecutionStatus;
             if (status == DEBUG_STATUS.BREAK)
             {
@@ -623,6 +624,131 @@ public sealed class DbgEngManager : IDisposable
             _eventCallbacks.EnqueueError($"Event pump stopped: WaitForEvent returned {hr}. " +
                                          "Target state is unknown; call get_system_state.");
             _thread.PumpEnabled = false;
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    //  BREAK-IN CLASSIFICATION
+    // ═══════════════════════════════════════════════════════════════
+
+    private void RequestInterrupt()
+    {
+        _interruptRequested = true;
+        try { _client?.Control.SetInterrupt(DEBUG_INTERRUPT.ACTIVE); }
+        catch { }
+    }
+
+    /// <summary>
+    /// Reads nt!RtlpBreakWithStatusInstruction from the KdDebuggerDataBlock
+    /// (no symbols needed). Every DbgBreakPointWithStatus break-in — Ctrl+Break,
+    /// KeBugCheck, the initial breakpoint — traps at exactly this address with
+    /// the DBG_STATUS_* reason in RAX. This is how WinDbg tells them apart.
+    /// </summary>
+    private void ReadBreakWithStatusAddress()
+    {
+        if (_client == null) return;
+        var buffer = Marshal.AllocHGlobal(8);
+        try
+        {
+            var hr = _client.DataSpaces.TryReadDebuggerData(
+                DEBUG_DATA.BreakpointWithStatusAddr, buffer, 8, out var size);
+            _breakWithStatusAddr = hr == HRESULT.S_OK && size == 8
+                ? (ulong)Marshal.ReadInt64(buffer)
+                : 0;
+        }
+        catch
+        {
+            _breakWithStatusAddr = 0;
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(buffer);
+        }
+        _logger.LogInformation("BreakpointWithStatus address: 0x{Addr:X16}", _breakWithStatusAddr);
+    }
+
+    /// <summary>
+    /// Must run on the DbgEng thread right after a WaitForEvent returned S_OK.
+    /// Decides whether a first-chance int 3 was our own interrupt (ignored), a
+    /// bugcheck, or a break instruction in target code, and flags the latter two
+    /// as breaking events so the pump stops and the LLM sees them.
+    /// </summary>
+    private void ClassifyPendingBreakIn()
+    {
+        var interruptRequested = _interruptRequested;
+        _interruptRequested = false;
+
+        if (_client == null || !_eventCallbacks.TryTakePendingBreakIn(out var address))
+            return;
+
+        if (_breakWithStatusAddr == 0)
+            ReadBreakWithStatusAddress();
+
+        long status;
+        string source;
+        if (_breakWithStatusAddr != 0 && address == _breakWithStatusAddr)
+        {
+            status = ReadRegister("rax") ?? ReadRegister("eax") ?? -1;
+            source = "DbgBreakPointWithStatus";
+        }
+        else if (_breakWithStatusAddr == 0)
+        {
+            status = interruptRequested ? DbgStatusControlC : -1;
+            source = "unknown (no debugger data block)";
+        }
+        else
+        {
+            status = -1;
+            source = "int 3 in target code";
+        }
+
+        _logger.LogInformation("Break-in at 0x{Addr:X16}: {Source}, status={Status}, interruptRequested={Req}",
+            address, source, status, interruptRequested);
+
+        switch (status)
+        {
+            case DbgStatusControlC:
+                return;
+
+            case DbgStatusBugcheckFirst:
+            case DbgStatusBugcheckSecond:
+            case DbgStatusFatal:
+                _eventCallbacks.RecordBreakingEvent(new DebugEvent
+                {
+                    Type = DebugEventKind.Bugcheck,
+                    Details = status == DbgStatusBugcheckSecond
+                        ? "BSOD: crash dump written, bugcheck callbacks ran; kd_continue reboots the VM"
+                        : "BSOD: kernel entered the bugcheck handler. Run kd_execute('!analyze -v') now; " +
+                          "kd_continue proceeds to the crash dump and reboot",
+                    Address = address
+                });
+                return;
+
+            default:
+                _eventCallbacks.RecordBreakingEvent(new DebugEvent
+                {
+                    Type = DebugEventKind.BreakIn,
+                    Details = status >= 0
+                        ? $"DbgBreakPointWithStatus({status}) at 0x{address:X16}"
+                        : $"Break instruction in target code at 0x{address:X16} (DbgBreakPoint/__debugbreak)",
+                    Address = address
+                });
+                return;
+        }
+    }
+
+    private long? ReadRegister(string name)
+    {
+        if (_client == null) return null;
+        try
+        {
+            var index = _client.Registers.GetIndexByName(name);
+            var value = _client.Registers.GetValue(index);
+            return value.I64;
+        }
+        catch
+        {
+            return null;
         }
     }
 
