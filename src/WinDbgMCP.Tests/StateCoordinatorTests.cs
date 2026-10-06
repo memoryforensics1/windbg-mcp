@@ -705,6 +705,21 @@ public class StateCoordinatorTests : IDisposable
         _rebootDetected = false;
         await _coordinator.RefreshStateAsync();
         Assert.False(_coordinator.State.KdRebootDetected);
+        Assert.Null(_coordinator.State.KdBreakReason);
+    }
+
+    [Fact]
+    public async Task RefreshState_NoDebuggeeDuringRebootKeepsSession()
+    {
+        SetVmRunning();
+        SetKdConnectedBroken();
+
+        _rebootDetected = true;
+        _execStatus = DebugExecutionStatus.NoDebuggee;
+        await _coordinator.RefreshStateAsync();
+
+        Assert.True(_coordinator.State.KdConnected);
+        Assert.True(_coordinator.State.KdRebootDetected);
     }
 
     [Fact]

@@ -123,10 +123,13 @@ public sealed class StateCoordinator
         {
             var status = GetDbgEngExecutionStatus?.Invoke() ?? DebugExecutionStatus.Uninitialized;
             _state.KdExecStatus = status;
+            var rebooted = IsRebootDetected?.Invoke() ?? false;
 
             // If DbgEng reports NoDebuggee but we thought we were connected,
-            // the connection was lost (VM rebooted, snapshot restored, etc.)
-            if (status == DebugExecutionStatus.NoDebuggee)
+            // the connection was lost (snapshot restored, session ended, etc.).
+            // During a reboot the engine is reconnecting on its own, so don't
+            // mark the session lost — kd_connect would orphan the live client.
+            if (status == DebugExecutionStatus.NoDebuggee && !rebooted)
             {
                 _logger.LogWarning("Kernel debugger connection lost (NoDebuggee detected)");
                 _state.KdConnected = false;
@@ -137,7 +140,6 @@ public sealed class StateCoordinator
 
             // 1.5 Reboot detection — the old kernel (and any BSOD it was in) is gone,
             // so the new break must be re-evaluated from scratch.
-            var rebooted = IsRebootDetected?.Invoke() ?? false;
             if (rebooted && !_state.KdRebootDetected)
             {
                 _logger.LogWarning("Target reboot detected; kernel state reset");
@@ -145,6 +147,10 @@ public sealed class StateCoordinator
                 _state.BugcheckCode = null;
                 _state.KdBreakReason = "Target rebooted";
                 _bsodCheckedForCurrentBreak = false;
+            }
+            else if (!rebooted && _state.KdRebootDetected)
+            {
+                _state.KdBreakReason = null;
             }
             _state.KdRebootDetected = rebooted;
         }

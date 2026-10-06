@@ -232,12 +232,14 @@ public sealed class DebugEventCallbacks : DebugBaseEventCallbacks
     public override HRESULT SessionStatus(DEBUG_SESSION status)
     {
         _logger.LogInformation("DbgEng event: SessionStatus {Status}", status);
-        if (status == DEBUG_SESSION.END)
+        if (status == DEBUG_SESSION.END || status == DEBUG_SESSION.FAILURE)
         {
             _eventQueue.Enqueue(new DebugEvent
             {
                 Type = DebugEventKind.SessionEnded,
-                Details = "Debug session ended"
+                Details = status == DEBUG_SESSION.FAILURE
+                    ? "Debug session failed — connection to the target was lost"
+                    : "Debug session ended"
             });
         }
         else if (status == DEBUG_SESSION.REBOOT)

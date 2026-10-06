@@ -40,8 +40,11 @@ public static class MetaTools
             if (s.KdRebootDetected)
             {
                 sb.AppendLine($"TARGET REBOOTED:   The kernel restarted since the last kd_continue.");
-                sb.AppendLine($"   Previous state (and any earlier BSOD) is gone. The debugger reconnected");
-                sb.AppendLine($"   at the initial breakpoint; call kd_continue to let the OS finish booting.");
+                sb.AppendLine($"   Previous state (and any earlier BSOD) is gone.");
+                if (s.KdExecStatus == DebugExecutionStatus.Break)
+                    sb.AppendLine($"   The debugger reconnected at the initial breakpoint; call kd_continue to let the OS finish booting.");
+                else
+                    sb.AppendLine($"   The debugger is waiting for the target to come back; poll get_system_state.");
             }
 
             if (s.KdExecStatus == DebugExecutionStatus.Break)
