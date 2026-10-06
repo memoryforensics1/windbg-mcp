@@ -107,6 +107,9 @@ public sealed class DbgEngManager : IDisposable
             _eventCallbacks.ClearEvents();
             _eventCallbacks.ClearBreakingEventFlag();
             _eventCallbacks.ClearRebootFlag();
+            _eventCallbacks.TryTakePendingBreakIn(out _);
+            _breakWithStatusAddr = 0;
+            _interruptRequested = false;
 
             // Set callbacks
             _client.OutputCallbacks = _outputCapture;
@@ -676,25 +679,42 @@ public sealed class DbgEngManager : IDisposable
     /// </summary>
     private void ClassifyPendingBreakIn()
     {
-        var interruptRequested = _interruptRequested;
-        _interruptRequested = false;
-
         if (_client == null || !_eventCallbacks.TryTakePendingBreakIn(out var address))
             return;
+
+        // Consume the flag only together with a break-in, otherwise an interrupt
+        // that coincided with a breakpoint event would be lost and its break-in
+        // misread after the next kd_continue.
+        var interruptRequested = _interruptRequested;
+        _interruptRequested = false;
 
         if (_breakWithStatusAddr == 0)
             ReadBreakWithStatusAddress();
 
+        // DbgBreakPointWithStatus(Status) is "int 3; ret" on x64 — the status is
+        // the untouched first argument, RCX (EAX on x86). RAX is logged only so a
+        // live run can confirm which register carries it.
+        var rcx = ReadRegister("rcx");
+        var rax = ReadRegister("rax");
+        var argRegister = rcx ?? ReadRegister("eax");
+        var atBreakWithStatus = _breakWithStatusAddr != 0 && address == _breakWithStatusAddr;
+
         long status;
         string source;
-        if (_breakWithStatusAddr != 0 && address == _breakWithStatusAddr)
+        if (atBreakWithStatus)
         {
-            status = ReadRegister("rax") ?? ReadRegister("eax") ?? -1;
+            status = argRegister.HasValue ? (long)(uint)argRegister.Value : -1L;
             source = "DbgBreakPointWithStatus";
         }
         else if (_breakWithStatusAddr == 0)
         {
-            status = interruptRequested ? DbgStatusControlC : -1;
+            // No data block: still trust a bugcheck-range status (a false halt costs
+            // one kd_continue; a false resume loses the BSOD), otherwise fall back
+            // to whether we asked for the interrupt.
+            long candidate = argRegister.HasValue ? (long)(uint)argRegister.Value : -1L;
+            status = candidate is DbgStatusBugcheckFirst or DbgStatusBugcheckSecond or DbgStatusFatal
+                ? candidate
+                : interruptRequested ? DbgStatusControlC : -1;
             source = "unknown (no debugger data block)";
         }
         else
@@ -703,8 +723,15 @@ public sealed class DbgEngManager : IDisposable
             source = "int 3 in target code";
         }
 
-        _logger.LogInformation("Break-in at 0x{Addr:X16}: {Source}, status={Status}, interruptRequested={Req}",
-            address, source, status, interruptRequested);
+        var decision = status switch
+        {
+            DbgStatusControlC => "debugger break-in, ignored",
+            DbgStatusBugcheckFirst or DbgStatusBugcheckSecond or DbgStatusFatal => "bugcheck",
+            _ => "target break-in"
+        };
+        _logger.LogInformation(
+            "Break-in at 0x{Addr:X16} ({Source}): rcx=0x{Rcx:X} rax=0x{Rax:X} status={Status} interruptRequested={Req} -> {Decision}",
+            address, source, rcx ?? -1, rax ?? -1, status, interruptRequested, decision);
 
         switch (status)
         {
@@ -718,7 +745,8 @@ public sealed class DbgEngManager : IDisposable
                 {
                     Type = DebugEventKind.Bugcheck,
                     Details = status == DbgStatusBugcheckSecond
-                        ? "BSOD: crash dump written, bugcheck callbacks ran; kd_continue reboots the VM"
+                        ? "BSOD: second bugcheck break-in (crash dump written). kd_continue should reboot the VM; " +
+                          "if it keeps breaking here, use vm_stop(hard=true) + vm_start"
                         : "BSOD: kernel entered the bugcheck handler. Run kd_execute('!analyze -v') now; " +
                           "kd_continue proceeds to the crash dump and reboot",
                     Address = address
