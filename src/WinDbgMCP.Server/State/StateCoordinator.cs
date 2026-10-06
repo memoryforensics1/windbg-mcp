@@ -32,6 +32,7 @@ public sealed class StateCoordinator
     public SystemState State => _state;
 
     public Func<List<DebugEvent>>? DrainDebugEvents { get; set; }
+    public Func<List<DebugEvent>>? GetRecentDebugEvents { get; set; }
 
     // These will be set when the managers are created
     // Using Func<> delegates to avoid circular dependencies during construction
