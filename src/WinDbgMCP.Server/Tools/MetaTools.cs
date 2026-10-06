@@ -45,6 +45,7 @@ public static class MetaTools
                     sb.AppendLine($"   The debugger reconnected at the initial breakpoint; call kd_continue to let the OS finish booting.");
                 else
                     sb.AppendLine($"   The debugger is waiting for the target to come back; poll get_system_state.");
+                    sb.AppendLine($"   If it never does (auto-reboot off), kd_disconnect then vm_stop(hard=true) + vm_start.");
             }
 
             if (s.KdExecStatus == DebugExecutionStatus.Break)

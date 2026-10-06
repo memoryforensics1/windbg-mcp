@@ -25,6 +25,15 @@ public class BugcheckParsingTests
     }
 
     [Fact]
+    public void BugcheckOutput_HexPrefixedCode_IsParsed()
+    {
+        var result = DbgEngManager.ParseBugcheckOutput("Bugcheck code 0x7E\n");
+        Assert.NotNull(result);
+        Assert.True(result!.Value.IsBugcheck);
+        Assert.Equal("0x0000007E", result.Value.BugcheckCode);
+    }
+
+    [Fact]
     public void BugcheckOutput_Unrecognised_ReturnsNull()
     {
         Assert.Null(DbgEngManager.ParseBugcheckOutput("Unable to read KiBugCheckData\n"));

@@ -503,6 +503,7 @@ public sealed class DbgEngManager : IDisposable
             }
 
             _logger.LogWarning("kd_wait_for_event: WaitForEvent returned {Hr}", waitHr);
+            _eventCallbacks.EnqueueError($"kd_wait_for_event: WaitForEvent returned {waitHr}");
             return $"WaitForEvent failed with {waitHr}. Target state is unknown — " +
                    "call get_system_state, then kd_break or kd_continue as appropriate.";
         }, timeout + TimeSpan.FromSeconds(5)); // Outer timeout slightly larger
@@ -554,7 +555,7 @@ public sealed class DbgEngManager : IDisposable
     /// </summary>
     public static (bool IsBugcheck, string? BugcheckCode)? ParseBugcheckOutput(string output)
     {
-        var match = Regex.Match(output, @"Bugcheck code\s+([0-9A-Fa-f]{1,16})\b",
+        var match = Regex.Match(output, @"Bugcheck code\s+(?:0x)?([0-9A-Fa-f]{1,16})\b",
             RegexOptions.IgnoreCase);
         if (!match.Success)
             return null;
@@ -565,7 +566,7 @@ public sealed class DbgEngManager : IDisposable
 
     public static (bool IsBugcheck, string? BugcheckCode) ParseLastEventFallback(string output)
     {
-        var match = Regex.Match(output, @"Bug\s*check\s+([0-9A-Fa-f]{1,16})\b",
+        var match = Regex.Match(output, @"Bug\s*check\s+(?:0x)?([0-9A-Fa-f]{1,16})\b",
             RegexOptions.IgnoreCase);
         if (!match.Success)
             return (false, null);
