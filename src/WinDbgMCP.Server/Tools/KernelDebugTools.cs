@@ -101,8 +101,8 @@ public static class KernelDebugTools
             {
                 state.SetBsodDetected(bugcheckCode);
                 return result + $"\n\nWARNING: BSOD DETECTED (bugcheck {bugcheckCode}). " +
-                       "The OS has crashed. Use kd_execute('!analyze -v') to investigate. " +
-                       "Guest operations will NOT work. Use vm_snapshot_restore to recover.";
+                       "The OS has crashed; guest operations will NOT work. " +
+                       ErrorMessages.BsodRecoveryOptions;
             }
 
             return result;
@@ -129,9 +129,15 @@ public static class KernelDebugTools
         var precheck = await state.ValidatePreconditionsAsync("kd_continue");
         if (precheck != null) return precheck.ErrorMessage!;
 
+        var wasBugcheck = state.State.IsBugcheck;
+        var bugcheckCode = state.State.BugcheckCode;
+
         try
         {
-            return await dbgEng.ContinueAsync();
+            var result = await dbgEng.ContinueAsync();
+            return wasBugcheck
+                ? result + "\n\n" + ErrorMessages.BsodContinueWarning(bugcheckCode)
+                : result;
         }
         catch (OperationCanceledException)
         {
@@ -235,7 +241,8 @@ public static class KernelDebugTools
                 {
                     state.SetBsodDetected(bugcheckCode);
                     return result + $"\n\nWARNING: BSOD DETECTED (bugcheck {bugcheckCode}). " +
-                           "The OS has crashed. Use kd_execute('!analyze -v') to investigate.";
+                           "The OS has crashed; guest operations will NOT work. " +
+                           ErrorMessages.BsodRecoveryOptions;
                 }
             }
 

@@ -314,15 +314,12 @@ public class StateCoordinatorTests : IDisposable
     }
 
     [Fact]
-    public async Task KdContinue_FailsOnBsod()
+    public async Task KdContinue_AllowedOnBsod_AsRecoveryPath()
     {
         SetVmRunning();
         SetKdConnectedBroken();
         _coordinator.SetBsodDetected("0x0000007E");
-        var result = await _coordinator.ValidatePreconditionsAsync("kd_continue");
-        Assert.NotNull(result);
-        Assert.Contains("BSOD", result!.Message);
-        Assert.Contains("!analyze", result.Message);
+        Assert.Null(await _coordinator.ValidatePreconditionsAsync("kd_continue"));
     }
 
     [Fact]

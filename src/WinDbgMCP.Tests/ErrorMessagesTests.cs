@@ -14,19 +14,27 @@ public class ErrorMessagesTests
     }
 
     [Fact]
-    public void BsodCannotResume_IncludesBugcheckCode()
+    public void BsodContinueWarning_IncludesBugcheckCodeAndNextStep()
     {
-        var msg = ErrorMessages.BsodCannotResume("0x0000007E");
+        var msg = ErrorMessages.BsodContinueWarning("0x0000007E");
         Assert.Contains("0x0000007E", msg);
-        Assert.Contains("!analyze -v", msg);
-        Assert.Contains("vm_snapshot_restore", msg);
+        Assert.Contains("get_system_state", msg);
+        Assert.Contains("kd_continue", msg);
     }
 
     [Fact]
-    public void BsodCannotResume_HandlesNullBugcheck()
+    public void BsodContinueWarning_HandlesNullBugcheck()
     {
-        var msg = ErrorMessages.BsodCannotResume(null);
+        var msg = ErrorMessages.BsodContinueWarning(null);
         Assert.Contains("unknown", msg);
+    }
+
+    [Fact]
+    public void BsodRecoveryOptions_ListAllThreePaths()
+    {
+        Assert.Contains("!analyze -v", ErrorMessages.BsodRecoveryOptions);
+        Assert.Contains("kd_continue", ErrorMessages.BsodRecoveryOptions);
+        Assert.Contains("vm_snapshot_restore", ErrorMessages.BsodRecoveryOptions);
     }
 
     [Fact]

@@ -72,26 +72,25 @@ public static class ErrorMessages
         "You must re-establish any debug sessions you need.";
 
     // === BSOD-Specific Errors ===
-    public static string BsodCannotResume(string? bugcheckCode) =>
-        $"BSOD — Bugcheck {bugcheckCode ?? "unknown"}. " +
-        "The OS has crashed and cannot be meaningfully resumed. " +
-        "Continuing will likely re-enter the bugcheck handler or hang. " +
-        "Options: " +
-        "(1) kd_execute('!analyze -v') to analyze the crash. " +
-        "(2) vm_snapshot_restore to revert to a clean state. " +
-        "(3) vm_stop(hard=true) then vm_start to reboot.";
+    public const string BsodRecoveryOptions =
+        "Options: (1) kd_execute('!analyze -v') to analyze the crash, " +
+        "(2) kd_continue to let the kernel finish the crash dump and reboot " +
+        "(get_system_state then shows TARGET REBOOTED; kd_continue again to boot), " +
+        "(3) vm_snapshot_restore to revert to a clean state.";
 
     public static string BsodGuestOpsUnavailable(string? bugcheckCode) =>
         $"BSOD DETECTED — Bugcheck {bugcheckCode ?? "unknown"}. " +
         "The guest OS has crashed. Guest operations will NOT work because " +
-        "the OS is dead (not just paused). " +
-        "Options: (1) kd_execute('!analyze -v') to analyze the crash, " +
-        "(2) vm_snapshot_restore to revert to a clean state, " +
-        "(3) vm_stop(hard=true) + vm_start to reboot.";
+        "the OS is dead (not just paused). " + BsodRecoveryOptions;
 
     public static string BsodCannotBreak(string? bugcheckCode) =>
-        $"BSOD — cannot resume execution, the OS has crashed " +
-        $"(Bugcheck {bugcheckCode ?? "unknown"}). " +
-        "Use kd_execute('!analyze -v') to investigate, then " +
-        "vm_snapshot_restore to recover.";
+        $"BSOD — the target is already halted in the bugcheck handler " +
+        $"(Bugcheck {bugcheckCode ?? "unknown"}); there is nothing to break into. " +
+        BsodRecoveryOptions;
+
+    public static string BsodContinueWarning(string? bugcheckCode) =>
+        $"WARNING: target was halted at a BSOD (Bugcheck {bugcheckCode ?? "unknown"}). " +
+        "The kernel will now finish the crash dump and then reboot (or halt, if " +
+        "auto-reboot is disabled). Poll get_system_state: when it shows TARGET REBOOTED " +
+        "the debugger is at the new initial breakpoint — call kd_continue to let the OS boot.";
 }

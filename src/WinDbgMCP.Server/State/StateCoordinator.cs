@@ -455,9 +455,8 @@ public sealed class StateCoordinator
                 "Call kd_break to halt it first, or kd_wait_for_event to " +
                 "wait for a breakpoint hit.");
 
-        if (_state.IsBugcheck)
-            return ToolResult.Error(ErrorMessages.BsodCannotResume(_state.BugcheckCode));
-
+        // A bugcheck is deliberately NOT blocked: continuing lets the kernel finish
+        // the crash dump and reboot, which is one of the documented recovery paths.
         if (_state.KdWaitPending)
             return ToolResult.Error(ErrorMessages.WaitPending);
 
