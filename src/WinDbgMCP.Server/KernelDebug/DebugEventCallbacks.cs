@@ -37,6 +37,9 @@ public sealed class DebugEventCallbacks : DebugBaseEventCallbacks
     public void ClearRebootFlag() => _rebootDetected = false;
     public void ClearEvents() => _eventQueue.Clear();
 
+    public void EnqueueError(string details) =>
+        _eventQueue.Enqueue(new DebugEvent { Type = DebugEventKind.Error, Details = details });
+
     public override HRESULT GetInterestMask(out DEBUG_EVENT_TYPE mask)
     {
         mask = DEBUG_EVENT_TYPE.BREAKPOINT

@@ -52,6 +52,10 @@ public sealed class DbgEngManager : IDisposable
 
         return await _thread.ExecuteAsync(() =>
         {
+            if (_client != null)
+                throw new InvalidOperationException(
+                    "A DbgEng session already exists. Call kd_disconnect before reconnecting.");
+
             _logger.LogInformation("Creating DbgEng client...");
 
             // Find Windows SDK debugger directory for dbgeng.dll
@@ -435,6 +439,20 @@ public sealed class DbgEngManager : IDisposable
 
             _thread.PumpEnabled = false;
 
+            // If the pump already caught an event the target is halted with no GO
+            // pending. WaitForEvent on a halted target would never return (or
+            // implicitly resume it), so report what was captured instead.
+            if (_client.Control.ExecutionStatus == DEBUG_STATUS.BREAK)
+            {
+                _outputCapture.Clear();
+                _client.Control.TryExecute(
+                    DEBUG_OUTCTL.THIS_CLIENT, ".lastevent", DEBUG_EXECUTE.DEFAULT);
+                var lastEvent = _outputCapture.GetAndClear().Trim();
+
+                return $"Target is already halted.\n{lastEvent}{FormatQueuedEvents()}\n" +
+                       "Use kd_execute to inspect state, or kd_continue to resume.";
+            }
+
             // INFINITE timeout + interrupt timer for kernel targets
             var waitTimeoutMs = timeoutSeconds * 1000;
             using var interruptTimer = new Timer(_ =>
@@ -458,13 +476,7 @@ public sealed class DbgEngManager : IDisposable
                     DEBUG_OUTCTL.THIS_CLIENT, ".lastevent", DEBUG_EXECUTE.DEFAULT);
                 var lastEvent = _outputCapture.GetAndClear().Trim();
 
-                // Drain queued events
-                var events = _eventCallbacks.DrainEvents();
-                var eventSummary = events.Count > 0
-                    ? "\nQueued events:\n" + string.Join("\n", events.Select(e => $"  {e}"))
-                    : "";
-
-                return $"Debug event received! Target is now halted.\n{lastEvent}{eventSummary}";
+                return $"Debug event received! Target is now halted.\n{lastEvent}{FormatQueuedEvents()}";
             }
             else
             {
@@ -530,6 +542,14 @@ public sealed class DbgEngManager : IDisposable
     //  EVENT PUMP (called by DbgEngThread when idle + target running)
     // ═══════════════════════════════════════════════════════════════
 
+    private string FormatQueuedEvents()
+    {
+        var events = _eventCallbacks.DrainEvents();
+        return events.Count > 0
+            ? "\nQueued events:\n" + string.Join("\n", events.Select(e => $"  {e}"))
+            : "";
+    }
+
     private void PumpEvents()
     {
         if (_client == null) return;
@@ -567,7 +587,9 @@ public sealed class DbgEngManager : IDisposable
         }
         else
         {
-            // Error — stop pumping
+            _logger.LogWarning("Event pump WaitForEvent failed with {Hr}; pump stopped", hr);
+            _eventCallbacks.EnqueueError($"Event pump stopped: WaitForEvent returned {hr}. " +
+                                         "Target state is unknown; call get_system_state.");
             _thread.PumpEnabled = false;
         }
     }
