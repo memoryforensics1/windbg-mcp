@@ -53,9 +53,16 @@ public sealed class DbgEngManager : IDisposable
 
         return await _thread.ExecuteAsync(() =>
         {
+            // Reaching here with a live client means the coordinator already
+            // considers the session lost (NoDebuggee); tear the old one down
+            // rather than leaking it or wedging kd_connect/kd_disconnect.
             if (_client != null)
-                throw new InvalidOperationException(
-                    "A DbgEng session already exists. Call kd_disconnect before reconnecting.");
+            {
+                _logger.LogWarning("Stale DbgEng client found on connect; ending old session");
+                _thread.PumpEnabled = false;
+                try { _client.TryEndSession(DEBUG_END.ACTIVE_TERMINATE); } catch { }
+                _client = null;
+            }
 
             _logger.LogInformation("Creating DbgEng client...");
 
@@ -438,12 +445,15 @@ public sealed class DbgEngManager : IDisposable
             if (_client == null)
                 throw new InvalidOperationException("Not connected.");
 
+            // While the pump is enabled a BREAK status is only ever its transient
+            // yield (a GO is pending); with the pump off, BREAK means the target is
+            // genuinely halted (pump caught an event, kd_break, or initial break).
+            var pumpWasEnabled = _thread.PumpEnabled;
             _thread.PumpEnabled = false;
 
-            // If the pump already caught an event the target is halted with no GO
-            // pending. WaitForEvent on a halted target would never return (or
-            // implicitly resume it), so report what was captured instead.
-            if (_client.Control.ExecutionStatus == DEBUG_STATUS.BREAK)
+            // WaitForEvent on a halted target would never return (or implicitly
+            // resume it), so report what was captured instead.
+            if (!pumpWasEnabled && _client.Control.ExecutionStatus == DEBUG_STATUS.BREAK)
             {
                 _outputCapture.Clear();
                 _client.Control.TryExecute(
@@ -466,12 +476,8 @@ public sealed class DbgEngManager : IDisposable
                 DEBUG_WAIT.DEFAULT,
                 unchecked((int)0xFFFFFFFF));
 
-            // Check if we got a real event or our own interrupt
-            var execStatus = _client.Control.ExecutionStatus;
-
-            if (waitHr == HRESULT.S_OK)
+            if (waitHr == HRESULT.S_OK && _eventCallbacks.HasBreakingEvent)
             {
-                // Event received — get details
                 _outputCapture.Clear();
                 _client.Control.TryExecute(
                     DEBUG_OUTCTL.THIS_CLIENT, ".lastevent", DEBUG_EXECUTE.DEFAULT);
@@ -479,14 +485,22 @@ public sealed class DbgEngManager : IDisposable
 
                 return $"Debug event received! Target is now halted.\n{lastEvent}{FormatQueuedEvents()}";
             }
-            else
+
+            if (waitHr == HRESULT.S_OK)
             {
+                // Our own timeout interrupt halted the target — resume it so the
+                // "no event" answer is true. The pump dispatches the GO.
+                _client.Control.TrySetExecutionStatus(DEBUG_STATUS.GO);
                 _thread.PumpEnabled = true;
                 return $"No debug event received within {timeoutSeconds}s. Target is still running. " +
                        "You can: (1) Call kd_wait_for_event again to keep waiting, " +
                        "(2) Call kd_break to manually halt the target, or " +
                        "(3) Proceed with guest operations while the target runs.";
             }
+
+            _logger.LogWarning("kd_wait_for_event: WaitForEvent returned {Hr}", waitHr);
+            return $"WaitForEvent failed with {waitHr}. Target state is unknown — " +
+                   "call get_system_state, then kd_break or kd_continue as appropriate.";
         }, timeout + TimeSpan.FromSeconds(5)); // Outer timeout slightly larger
     }
 
