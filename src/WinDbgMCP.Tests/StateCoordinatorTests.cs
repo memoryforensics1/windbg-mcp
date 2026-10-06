@@ -889,6 +889,72 @@ public class StateCoordinatorTests : IDisposable
     }
 
     [Fact]
+    public async Task RunTool_EventsQueuedBeforeResetStillReachBanner()
+    {
+        SetVmRunning();
+        SetKdConnectedRunning();
+        await _coordinator.RefreshStateAsync();
+        _pendingEvents.Add(new DebugEvent { Type = DebugEventKind.Bugcheck, Details = "BSOD before restore" });
+
+        var result = await _coordinator.RunToolAsync("vm_snapshot_restore", () =>
+        {
+            // ResetAllState clears the engine queue in production; simulate that
+            _pendingEvents.Clear();
+            _coordinator.ResetAllState();
+            return Task.FromResult("restored");
+        });
+
+        Assert.Contains("Bugcheck: BSOD before restore", result);
+        Assert.EndsWith("restored", result);
+    }
+
+    [Fact]
+    public async Task RunTool_BodyExceptionIsReportedWithBanner()
+    {
+        SetVmRunning();
+        await _coordinator.RefreshStateAsync();
+        _pendingEvents.Add(new DebugEvent { Type = DebugEventKind.Error, Details = "pump stopped" });
+
+        var result = await _coordinator.RunToolAsync("vm_snapshot_list", () => throw new InvalidOperationException("boom"));
+
+        Assert.Contains("Error: pump stopped", result);
+        Assert.EndsWith("vm_snapshot_list failed: InvalidOperationException: boom", result);
+    }
+
+    [Fact]
+    public async Task RunTool_UnrelatedRefusalIsNotBlamedOnInformationalEvents()
+    {
+        SetVmRunning();
+        SetKdConnectedRunning();
+        await _coordinator.RefreshStateAsync();
+        _pendingEvents.Add(new DebugEvent { Type = DebugEventKind.ExceptionFirstChance, Details = "First-chance exception 0xC0000005" });
+
+        var result = await _coordinator.RunToolAsync("kd_execute", () => Task.FromResult("ran"));
+
+        Assert.Contains("NOT EXECUTED: 'kd_execute'", result);
+        Assert.Contains("unrelated to the informational events above", result);
+        Assert.DoesNotContain("preconditions no longer hold", result);
+    }
+
+    [Fact]
+    public async Task RunTool_ToolCausedPowerChangeIsNotAlerted()
+    {
+        SetVmRunning();
+        await _coordinator.RefreshStateAsync();
+
+        _vmPower = VmPowerState.Off;
+        var result = await _coordinator.RunToolAsync("vm_stop", () =>
+        {
+            _coordinator.SetVmPowerChangedByTool(VmPowerState.Off);
+            return Task.FromResult("stopped");
+        });
+
+        Assert.DoesNotContain("VM POWER STATE CHANGED", result);
+        Assert.Equal(VmPowerState.Off, _coordinator.State.VmPower);
+        Assert.Equal(VmToolsState.Unknown, _coordinator.State.VmTools);
+    }
+
+    [Fact]
     public async Task RunTool_PrecheckWarningIsPrepended()
     {
         SetVmRunning();

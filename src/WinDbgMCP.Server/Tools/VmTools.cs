@@ -27,6 +27,7 @@ public static class VmTools
                 if (!result.Success)
                     return $"vm_start failed: {result.Message}";
 
+                state.SetVmPowerChangedByTool(VmPowerState.Running);
                 return result.Message + " Call get_system_state to check when VMware Tools is running.";
             }
             catch (TimeoutException)
@@ -57,6 +58,7 @@ public static class VmTools
                 if (!result.Success)
                     return $"vm_stop failed: {result.Message}";
 
+                state.SetVmPowerChangedByTool(VmPowerState.Off);
                 return result.Message;
             }
             catch (TimeoutException)

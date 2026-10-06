@@ -99,6 +99,7 @@ public static class KernelDebugTools
                 try
                 {
                     var (isBugcheck, bugcheckCode) = await dbgEng.DetectBugcheckAsync();
+                    state.SetBsodProbed();
                     if (isBugcheck)
                     {
                         state.SetBsodDetected(bugcheckCode);
@@ -244,6 +245,7 @@ public static class KernelDebugTools
                 if (result.Contains("halted", StringComparison.OrdinalIgnoreCase))
                 {
                     var (isBugcheck, bugcheckCode) = await dbgEng.DetectBugcheckAsync();
+                    state.SetBsodProbed();
                     if (isBugcheck)
                     {
                         state.SetBsodDetected(bugcheckCode);

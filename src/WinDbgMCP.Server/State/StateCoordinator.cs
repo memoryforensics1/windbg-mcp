@@ -27,6 +27,7 @@ public sealed class StateCoordinator
     // State transitions observed since the last tool result was produced.
     // Flushed into the banner RunToolAsync prepends to every tool result.
     private readonly List<string> _alerts = new();
+    private readonly List<DebugEvent> _pendingEvents = new();
 
     // Public read-only accessor for state
     public SystemState State => _state;
@@ -72,6 +73,11 @@ public sealed class StateCoordinator
     {
         var precheck = await ValidatePreconditionsAsync(toolName);
 
+        // Drain now as well as after the body: snapshot restore / target switch /
+        // reconnect clear the engine queue, and events queued before them must
+        // still reach the banner.
+        await CollectDebugEventsAsync();
+
         string result;
         var executed = precheck == null || precheck.IsSuccess;
         if (!executed)
@@ -80,12 +86,48 @@ public sealed class StateCoordinator
         }
         else
         {
-            result = await body();
+            try
+            {
+                result = await body();
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Tool {Tool} threw", toolName);
+                result = $"{toolName} failed: {ex.GetType().Name}: {ex.Message}";
+            }
             if (precheck != null)
                 result = precheck.Message + " " + result;
         }
 
         return await PrependAlertsAsync(result, executed);
+    }
+
+    private async Task CollectDebugEventsAsync()
+    {
+        await _lock.WaitAsync();
+        try
+        {
+            DrainIntoPending();
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
+    // Must hold _lock
+    private void DrainIntoPending()
+    {
+        try
+        {
+            var drained = DrainDebugEvents?.Invoke();
+            if (drained != null)
+                _pendingEvents.AddRange(drained);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Draining debug events failed");
+        }
     }
 
     private async Task<string> PrependAlertsAsync(string result, bool executed)
@@ -102,6 +144,7 @@ public sealed class StateCoordinator
                 _logger.LogDebug(ex, "Post-tool state refresh failed");
             }
 
+            DrainIntoPending();
             var banner = BuildAlertBanner(executed);
             return banner == null ? result : banner + "\n" + result;
         }
@@ -123,18 +166,11 @@ public sealed class StateCoordinator
         DebugEventKind.Error,
     };
 
+    // Must hold _lock
     private string? BuildAlertBanner(bool executed)
     {
-        List<DebugEvent> events;
-        try
-        {
-            events = DrainDebugEvents?.Invoke() ?? new List<DebugEvent>();
-        }
-        catch (Exception ex)
-        {
-            _logger.LogDebug(ex, "Draining debug events failed");
-            events = new List<DebugEvent>();
-        }
+        var events = _pendingEvents.ToList();
+        _pendingEvents.Clear();
 
         var important = events.Where(e => ImportantEventKinds.Contains(e.Type)).ToList();
         var firstChance = events.Where(e => e.Type == DebugEventKind.ExceptionFirstChance).ToList();
@@ -159,9 +195,13 @@ public sealed class StateCoordinator
             sb.AppendLine($"- ... and {firstChance.Count - 3} more first-chance exceptions (informational)");
         if (other > 0)
             sb.AppendLine($"- {other} module/process/thread events (informational)");
-        sb.AppendLine(executed
-            ? "- The call below ran after or during the above; read its result in that light."
-            : "- The call below was NOT executed: the state changed before it ran and its preconditions no longer hold.");
+        var relevantChange = _alerts.Count > 0 || important.Count > 0;
+        sb.AppendLine((executed, relevantChange) switch
+        {
+            (true, _) => "- The call below ran after or during the above; read its result in that light.",
+            (false, true) => "- The call below was NOT executed: the state changed before it ran and its preconditions no longer hold — see the reason in its result.",
+            (false, false) => "- The call below was NOT executed; see the reason in its result (unrelated to the informational events above).",
+        });
         sb.Append("!!! END !!!");
 
         _alerts.Clear();
@@ -456,6 +496,25 @@ public sealed class StateCoordinator
         _state.BugcheckCode = null;
         _state.KdRebootDetected = false;
     }
+
+    /// <summary>
+    /// Record a power transition the tool itself caused (vm_start / vm_stop) so the
+    /// post-call refresh doesn't report it as an unexpected change, and forget the
+    /// VMware Tools status, which is meaningless across a power cycle.
+    /// </summary>
+    public void SetVmPowerChangedByTool(VmPowerState newState)
+    {
+        _state.VmPower = newState;
+        _state.VmTools = VmToolsState.Unknown;
+        _lastVmStateRefresh = DateTime.UtcNow;
+        _lastToolsRefresh = DateTime.MinValue;
+    }
+
+    /// <summary>
+    /// Mark the current break as already probed for a bugcheck (by kd_break /
+    /// kd_wait_for_event) so the post-call refresh doesn't probe again.
+    /// </summary>
+    public void SetBsodProbed() => _bsodCheckedForCurrentBreak = true;
 
     /// <summary>
     /// Update VM power state after a successful pause.
