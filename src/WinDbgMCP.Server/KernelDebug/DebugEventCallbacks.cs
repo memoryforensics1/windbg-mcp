@@ -35,6 +35,7 @@ public sealed class DebugEventCallbacks : DebugBaseEventCallbacks
              | DEBUG_EVENT_TYPE.UNLOAD_MODULE
              | DEBUG_EVENT_TYPE.CREATE_PROCESS
              | DEBUG_EVENT_TYPE.EXIT_PROCESS
+             | DEBUG_EVENT_TYPE.SYSTEM_ERROR
              | DEBUG_EVENT_TYPE.SESSION_STATUS
              | DEBUG_EVENT_TYPE.CHANGE_ENGINE_STATE;
         return HRESULT.S_OK;
