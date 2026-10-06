@@ -22,6 +22,9 @@ public sealed class DebugEventCallbacks : DebugBaseEventCallbacks
     private long _breakInAddress;
 
     private const uint StatusBreakpoint = 0x80000003;
+    private const uint StatusSingleStep = 0x80000004;
+    private const int RecentEventCapacity = 20;
+    private readonly ConcurrentQueue<DebugEvent> _recentEvents = new();
 
     public DebugEventCallbacks(ILogger? logger = null)
     {
@@ -41,7 +44,11 @@ public sealed class DebugEventCallbacks : DebugBaseEventCallbacks
 
     public void ClearBreakingEventFlag() => _hasBreakingEvent = false;
     public void ClearRebootFlag() => _rebootDetected = false;
-    public void ClearEvents() => _eventQueue.Clear();
+    public void ClearEvents()
+    {
+        _eventQueue.Clear();
+        _recentEvents.Clear();
+    }
 
     public void EnqueueError(string details) =>
         _eventQueue.Enqueue(new DebugEvent { Type = DebugEventKind.Error, Details = details });
@@ -133,7 +140,19 @@ public sealed class DebugEventCallbacks : DebugBaseEventCallbacks
             }
 
             // Other first-chance exceptions are routine in a running kernel.
-            // Let the kernel handle them — don't break or set the flag.
+            // Let the kernel handle them — don't break or set the flag — but queue
+            // them as informational so the LLM still sees e.g. a driver's first
+            // access violation. Single-step traps are the engine's own stepping.
+            if ((uint)exception.ExceptionCode != StatusSingleStep)
+            {
+                _eventQueue.Enqueue(new DebugEvent
+                {
+                    Type = DebugEventKind.ExceptionFirstChance,
+                    Details = $"First-chance exception 0x{(uint)exception.ExceptionCode:X8} at " +
+                              $"0x{exception.ExceptionAddress:X16} (informational, kernel is handling it)",
+                    Address = (ulong)exception.ExceptionAddress
+                });
+            }
             return DEBUG_STATUS.GO_NOT_HANDLED;
         }
 
@@ -277,8 +296,14 @@ public sealed class DebugEventCallbacks : DebugBaseEventCallbacks
         var events = new List<DebugEvent>();
         while (events.Count < maxCount && _eventQueue.TryDequeue(out var evt))
         {
+            _recentEvents.Enqueue(evt);
+            while (_recentEvents.Count > RecentEventCapacity)
+                _recentEvents.TryDequeue(out _);
             events.Add(evt);
         }
         return events;
     }
+
+    /// <summary>Last events handed out by DrainEvents, oldest first.</summary>
+    public List<DebugEvent> RecentEvents => _recentEvents.ToList();
 }

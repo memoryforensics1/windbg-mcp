@@ -39,6 +39,8 @@ public sealed class DbgEngManager : IDisposable
     public bool IsConnected => _client != null;
     public int PendingEventCount => _eventCallbacks.PendingCount;
     public bool RebootDetected => _eventCallbacks.RebootDetected;
+    public List<DebugEvent> DrainEvents() => _eventCallbacks.DrainEvents();
+    public List<DebugEvent> RecentEvents => _eventCallbacks.RecentEvents;
 
     public DbgEngManager(DbgEngThread thread, ServerConfig config, ILogger<DbgEngManager> logger)
     {
