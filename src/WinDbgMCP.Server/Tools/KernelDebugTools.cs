@@ -269,7 +269,11 @@ public static class KernelDebugTools
             }
             catch (OperationCanceledException)
             {
-                return $"Wait cancelled after {timeoutSeconds}s. Target is still running.";
+                // Don't assert "still running": during a reboot the engine has no
+                // debuggee and the wait couldn't be woken before the outer timeout.
+                return $"Wait returned after {timeoutSeconds}s without reaching the engine wait. " +
+                       "The target is busy or rebooting. Call get_system_state to see the real state, " +
+                       "then kd_wait_for_event again or kd_break.";
             }
             catch (Exception ex)
             {
