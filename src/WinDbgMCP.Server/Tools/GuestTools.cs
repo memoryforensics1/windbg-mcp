@@ -31,7 +31,7 @@ public static class GuestTools
             // A graceful restart never re-attaches to an existing KD session and
             // leaves the engine stuck for good, so detach before letting it happen.
             var note = "";
-            if (state.State.KdConnected && RestartCommand.IsMatch(command))
+            if (state.State.KdConnected && IsRestartCommand(command))
             {
                 DetachResult detach;
                 try { detach = await dbgEng.DisconnectAsync(); }
@@ -53,8 +53,25 @@ public static class GuestTools
         });
     }
 
+    /// <summary>
+    /// True for a guest command that restarts or shuts the OS down, so KD can be
+    /// detached first (a graceful restart never re-attaches to a live KD session).
+    /// A missed match risks wedging the engine; a spurious match only costs a
+    /// needless detach, so the bias is toward matching: any <c>shutdown</c> except
+    /// the no-op switches (/a abort, /l logoff, /h hibernate, /i GUI, /? help), the
+    /// PowerShell cmdlets, wmic reboot, and the Win32Shutdown WMI method.
+    /// </summary>
+    public static bool IsRestartCommand(string command) => RestartCommand.IsMatch(command);
+
+    // The delimiter class includes quotes, parens and backslash so a full path or
+    // quoted invocation still matches; the shutdown lookahead is bounded to the
+    // current command segment ([^&|;]*) so a later "&& echo -l" cannot suppress it.
     private static readonly Regex RestartCommand = new(
-        @"(^|[\s&|;])(shutdown(\.exe)?\s+(?=.*(/|-)[rsg]\b)|Restart-Computer\b|Stop-Computer\b)",
+        @"(^|[\s&|;""'(\\])(" +
+        @"shutdown(\.exe)?\b(?![^&|;]*(/|-)(?:[alhi]\b|\?))|" +
+        @"Restart-Computer\b|Stop-Computer\b|" +
+        @"wmic\b[^&|;]*\bos\b[^&|;]*\b(reboot|shutdown)\b)" +
+        @"|\bWin32Shutdown\b",
         RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
     [McpServerTool(Name = "guest_transfer_to_vm"), Description(
