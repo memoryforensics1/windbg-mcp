@@ -108,7 +108,7 @@ public static class KernelDebugTools
                 // refresh retries the probe on the next tool call anyway.
                 try
                 {
-                    var (isBugcheck, bugcheckCode) = await dbgEng.DetectBugcheckAsync();
+                    var (isBugcheck, bugcheckCode, _) = await dbgEng.DetectBugcheckAsync();
                     state.SetBsodProbed();
                     if (isBugcheck)
                     {
@@ -254,7 +254,7 @@ public static class KernelDebugTools
                 // Check for BSOD if we received an event
                 if (result.Contains("halted", StringComparison.OrdinalIgnoreCase))
                 {
-                    var (isBugcheck, bugcheckCode) = await dbgEng.DetectBugcheckAsync();
+                    var (isBugcheck, bugcheckCode, _) = await dbgEng.DetectBugcheckAsync();
                     state.SetBsodProbed();
                     if (isBugcheck)
                     {

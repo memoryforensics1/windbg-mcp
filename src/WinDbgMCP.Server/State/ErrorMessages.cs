@@ -81,6 +81,20 @@ public static class ErrorMessages
         "(3) vm_snapshot_restore to revert to a clean state. " +
         "(4) vm_stop(hard=true) + vm_start if the target never comes back (auto-reboot disabled).";
 
+    /// <summary>
+    /// Halted at a second-chance exception. This is where a real driver crash stops
+    /// first (e.g. an access violation that becomes bugcheck 0x3B/0x7E/0x1E): the
+    /// kernel has not called KeBugCheckEx yet, so .bugcheck still reads zero, but the
+    /// OS is already lost. The model must learn that here, not after a timeout.
+    /// </summary>
+    public static string FatalExceptionPending(string? lastEvent) =>
+        $"FATAL EXCEPTION (second chance): {lastEvent ?? "unhandled exception"}. The kernel has no handler for " +
+        "it, so the OS is effectively crashed: guest operations will NOT work, and the next kd_continue passes " +
+        "the exception back (gn), which bugchecks the machine (then the usual BSOD sequence: dump, reboot, " +
+        "initial breakpoint, kd_continue). Analyze NOW while the faulting context is intact: " +
+        "kd_execute('!analyze -v') names the bugcheck it will become and the faulting driver; kd_execute('k') " +
+        "shows the faulting stack; kd_execute('r') the registers. Or vm_snapshot_restore to revert.";
+
     public static string BsodGuestOpsUnavailable(string? bugcheckCode) =>
         $"BSOD DETECTED — Bugcheck {bugcheckCode ?? "unknown"}. " +
         "The guest OS has crashed. Guest operations will NOT work because " +

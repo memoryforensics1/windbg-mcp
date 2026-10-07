@@ -24,6 +24,10 @@ public sealed class SystemState
     public bool IsBugcheck { get; set; }
     public string? BugcheckCode { get; set; }
 
+    // Halted at a second-chance (unhandled) exception: the kernel has not entered
+    // KeBugCheckEx yet (so IsBugcheck is false) but the next resume bugchecks the OS.
+    public bool KdFatalExceptionPending { get; set; }
+
     // Target rebooted since the last kd_continue; engine reconnected at the initial breakpoint
     public bool KdRebootDetected { get; set; }
 

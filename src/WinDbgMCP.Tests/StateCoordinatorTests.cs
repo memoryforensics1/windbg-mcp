@@ -50,8 +50,11 @@ public class StateCoordinatorTests : IDisposable
         _coordinator.IsDbgsrvConnected = () => _dbgsrvConnected;
         _coordinator.GetDbgsrvAttachedPid = () => _dbgsrvPid;
         _coordinator.IsRebootDetected = () => _rebootDetected;
-        _coordinator.DetectBugcheckAsync = () =>
-            _detectBugcheck?.Invoke() ?? Task.FromResult((false, (string?)null));
+        _coordinator.DetectBugcheckAsync = async () =>
+        {
+            var (isBugcheck, code) = await (_detectBugcheck?.Invoke() ?? Task.FromResult((false, (string?)null)));
+            return (isBugcheck, code, (string?)null);
+        };
         _coordinator.DrainDebugEvents = () =>
         {
             var drained = _pendingEvents.ToList();

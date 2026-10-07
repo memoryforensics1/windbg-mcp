@@ -62,4 +62,19 @@ public class BugcheckParsingTests
         Assert.True(result.IsBugcheck);
         Assert.Equal("0x0000007E", result.BugcheckCode);
     }
+
+    [Theory]
+    [InlineData("Last event: Access violation - code c0000005 (!!! second chance !!!)\n  debugger time: ...",
+                "Access violation - code c0000005 (!!! second chance !!!)")]
+    [InlineData("Last event: Break instruction exception - code 80000003 (first chance)",
+                "Break instruction exception - code 80000003 (first chance)")]
+    [InlineData("  \n\nLast event: Bugcheck 1E", "Bugcheck 1E")]
+    [InlineData("some other line\nLast event: X", "some other line")]
+    public void FirstLastEventLine_StripsPrefix(string output, string expected)
+        => Assert.Equal(expected, DbgEngManager.FirstLastEventLine(output));
+
+    [Fact]
+    public void FirstLastEventLine_Empty_IsNull()
+        => Assert.Null(DbgEngManager.FirstLastEventLine("   \n  \n"));
 }
+

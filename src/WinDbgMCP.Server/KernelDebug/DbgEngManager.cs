@@ -48,6 +48,8 @@ public sealed class DbgEngManager : IDisposable
     public bool IsConnected => _client != null;
     public int PendingEventCount => _eventCallbacks.PendingCount;
     public bool RebootDetected => _eventCallbacks.RebootDetected;
+    /// <summary>A second-chance (unhandled) exception is the current event: the next resume bugchecks the OS.</summary>
+    public bool SecondChancePending => _eventCallbacks.SecondChancePending;
     public List<DebugEvent> DrainEvents() => _eventCallbacks.DrainEvents();
     public List<DebugEvent> RecentEvents => _eventCallbacks.RecentEvents;
 
@@ -649,14 +651,23 @@ public sealed class DbgEngManager : IDisposable
     /// Check if the current break is due to a BSOD/bugcheck.
     /// Must be called while target is broken in.
     /// </summary>
-    public async Task<(bool IsBugcheck, string? BugcheckCode)> DetectBugcheckAsync()
+    public async Task<(bool IsBugcheck, string? BugcheckCode, string? LastEvent)> DetectBugcheckAsync()
     {
         var timeout = TimeSpan.FromSeconds(5);
 
         return await _thread.ExecuteAsync(() =>
         {
             if (_client == null)
-                return (false, (string?)null);
+                return (false, (string?)null, (string?)null);
+
+            // .lastevent is the human-readable reason for this break (breakpoint,
+            // access violation, break instruction...). It goes into get_system_state
+            // as the Break Reason, so the model never sees "unknown" at a halt.
+            _outputCapture.Clear();
+            _client.Control.TryExecute(
+                DEBUG_OUTCTL.THIS_CLIENT, ".lastevent", DEBUG_EXECUTE.DEFAULT);
+            var lastEventOutput = _outputCapture.GetAndClear();
+            var lastEvent = FirstLastEventLine(lastEventOutput);
 
             // .bugcheck reads KiBugCheckData, which KeBugCheckEx fills in — so a
             // breakpoint sitting *at* nt!KeBugCheckEx is correctly not a bugcheck yet.
@@ -669,16 +680,23 @@ public sealed class DbgEngManager : IDisposable
 
             var parsed = ParseBugcheckOutput(bugcheckOutput);
             if (parsed != null)
-                return parsed.Value;
+                return (parsed.Value.IsBugcheck, parsed.Value.BugcheckCode, lastEvent);
 
             _logger.LogDebug(".bugcheck output not recognised, falling back to .lastevent: {Output}",
                 bugcheckOutput.Trim());
 
-            _outputCapture.Clear();
-            _client.Control.TryExecute(
-                DEBUG_OUTCTL.THIS_CLIENT, ".lastevent", DEBUG_EXECUTE.DEFAULT);
-            return ParseLastEventFallback(_outputCapture.GetAndClear());
+            var fallback = ParseLastEventFallback(lastEventOutput);
+            return (fallback.IsBugcheck, fallback.BugcheckCode, lastEvent);
         }, timeout);
+    }
+
+    /// <summary>"Last event: Access violation - code c0000005 (!!! second chance !!!)" -> the part after the colon.</summary>
+    public static string? FirstLastEventLine(string output)
+    {
+        var line = output.Split('\n').Select(l => l.Trim()).FirstOrDefault(l => l.Length > 0);
+        if (line == null) return null;
+        const string prefix = "Last event:";
+        return line.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) ? line[prefix.Length..].Trim() : line;
     }
 
     /// <summary>

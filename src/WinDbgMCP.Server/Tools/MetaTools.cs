@@ -67,6 +67,11 @@ public static class MetaTools
                         sb.AppendLine($"   The OS has CRASHED. Guest ops will NOT work.");
                         sb.AppendLine($"   {ErrorMessages.BsodRecoveryOptions}");
                     }
+                    else if (s.KdFatalExceptionPending)
+                    {
+                        sb.AppendLine($"FATAL EXCEPTION:   {s.KdBreakReason ?? "unhandled exception (second chance)"}");
+                        sb.AppendLine($"   {ErrorMessages.FatalExceptionPending(s.KdBreakReason)}");
+                    }
                 }
 
                 sb.AppendLine($"Pending Events:    {s.PendingEventCount}");
@@ -92,6 +97,8 @@ public static class MetaTools
                 {
                     if (s.IsBugcheck)
                         sb.AppendLine($"   -> BSOD: OS has crashed");
+                    else if (s.KdFatalExceptionPending)
+                        sb.AppendLine($"   -> Fatal exception: the OS is crashed; kd_continue would bugcheck it, not resume it");
                     else
                         sb.AppendLine($"   -> Kernel debugger has frozen the VM (call kd_continue)");
                 }

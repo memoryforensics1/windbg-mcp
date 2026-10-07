@@ -44,7 +44,9 @@ public sealed class StateCoordinator
     /// <summary>True while the engine thread is parked in a target-less wait that did not answer a probe.</summary>
     public Func<bool>? IsEngineParked { get; set; }
     public Func<int>? GetPendingEventCount { get; set; }
-    public Func<Task<(bool IsBugcheck, string? BugcheckCode)>>? DetectBugcheckAsync { get; set; }
+    public Func<Task<(bool IsBugcheck, string? BugcheckCode, string? LastEvent)>>? DetectBugcheckAsync { get; set; }
+    /// <summary>True while the current halt is a second-chance exception (the next resume bugchecks).</summary>
+    public Func<bool>? IsSecondChancePending { get; set; }
     public Func<bool>? IsRebootDetected { get; set; }
 
     // User-mode debug state delegates
@@ -350,8 +352,14 @@ public sealed class StateCoordinator
             {
                 try
                 {
-                    var (isBugcheck, bugcheckCode) = await DetectBugcheckAsync();
+                    var (isBugcheck, bugcheckCode, lastEvent) = await DetectBugcheckAsync();
                     _bsodCheckedForCurrentBreak = true;
+                    if (lastEvent != null && !_state.KdRebootDetected)
+                        _state.KdBreakReason = lastEvent;
+
+                    var fatal = IsSecondChancePending?.Invoke() ?? false;
+                    _state.KdFatalExceptionPending = fatal && !isBugcheck;
+
                     if (isBugcheck)
                     {
                         _state.IsBugcheck = true;
@@ -360,6 +368,11 @@ public sealed class StateCoordinator
                         _alerts.Add($"BSOD DETECTED (bugcheck {bugcheckCode}): the guest OS has crashed and is " +
                                     "halted in the debugger. Guest operations will not work. " +
                                     ErrorMessages.BsodRecoveryOptions);
+                    }
+                    else if (_state.KdFatalExceptionPending)
+                    {
+                        _logger.LogWarning("Fatal (second-chance) exception pending: {Event}", lastEvent);
+                        _alerts.Add(ErrorMessages.FatalExceptionPending(lastEvent));
                     }
                 }
                 catch (Exception ex)
@@ -372,6 +385,9 @@ public sealed class StateCoordinator
         {
             _state.IsBugcheck = false;
             _state.BugcheckCode = null;
+            _state.KdFatalExceptionPending = false;
+            if (!_state.KdRebootDetected)
+                _state.KdBreakReason = null;
             _bsodCheckedForCurrentBreak = false;
         }
 
