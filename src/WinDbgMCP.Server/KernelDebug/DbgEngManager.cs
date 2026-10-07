@@ -89,10 +89,12 @@ public sealed class DbgEngManager : IDisposable
         // thread, and if it does not answer, report the engine as wedged.
         if (_client != null)
         {
-            ExitWait();
+            WakeEngineThread();
             try
             {
-                await _thread.ExecuteAsync(() => { }, ThreadGrabTimeout);
+                // Stop the pump from re-entering its wait between this probe and
+                // the connect work item below.
+                await _thread.ExecuteAsync(() => { _thread.PumpEnabled = false; }, ThreadGrabTimeout);
             }
             catch (OperationCanceledException)
             {
@@ -240,6 +242,8 @@ public sealed class DbgEngManager : IDisposable
     /// <summary>
     /// Disconnect from the kernel debug target.
     /// Resumes the target first so the VM keeps running after disconnect.
+    /// Returns <c>Detached == false</c> when the session is still live; callers
+    /// must then keep treating the debugger as connected.
     /// </summary>
     public async Task<string> DisconnectAsync()
     {
@@ -252,7 +256,7 @@ public sealed class DbgEngManager : IDisposable
         bool needsResume;
         try
         {
-            ExitWait();
+            WakeEngineThread();
             // Must outlast the pump's yield period, which is the only thing that
             // frees the thread while a live target is running.
             needsResume = await _thread.ExecuteAsync(() =>
@@ -288,8 +292,9 @@ public sealed class DbgEngManager : IDisposable
             await Task.Delay(3000);
         }
 
-        // Step 2: Disconnect (EXIT again in case the pump re-entered its wait).
-        ExitWait();
+        // Step 2: Disconnect (wake the thread again: the pump re-entered its wait
+        // to dispatch the GO).
+        WakeEngineThread();
 
         try
         {
@@ -763,8 +768,10 @@ public sealed class DbgEngManager : IDisposable
     /// verified) driven by a periodic timer: from <paramref name="firstMs"/> on it
     /// sends ACTIVE break-ins every <see cref="InterruptRetryMs"/> (a request sent
     /// while the kernel is busy is dropped, so one shot is not enough); once
-    /// <paramref name="deadlineMs"/> has passed it also sends EXIT. With
-    /// <paramref name="breakInEarly"/> false, nothing is sent before the deadline.
+    /// <paramref name="deadlineMs"/> has passed it wakes the thread with
+    /// <see cref="WakeEngineThread"/> (a break-in on a live target, EXIT on a
+    /// target-less wait). With <paramref name="breakInEarly"/> false, nothing is
+    /// sent before the deadline.
     /// Returns S_OK on an event, S_FALSE / E_PENDING when the wait was abandoned.
     /// </summary>
     private HRESULT WaitForEventInterruptible(int firstMs, int deadlineMs, bool breakInEarly)
@@ -772,11 +779,10 @@ public sealed class DbgEngManager : IDisposable
         var started = Environment.TickCount64;
         using var timer = new Timer(_ =>
         {
-            var pastDeadline = Environment.TickCount64 - started >= deadlineMs;
-            if (breakInEarly || pastDeadline)
+            if (Environment.TickCount64 - started >= deadlineMs)
+                WakeEngineThread();
+            else if (breakInEarly)
                 RequestInterrupt();
-            if (pastDeadline)
-                ExitWait();
         }, null, firstMs, InterruptRetryMs);
 
         return _client!.Control.TryWaitForEvent(DEBUG_WAIT.DEFAULT, unchecked((int)0xFFFFFFFF));
@@ -809,12 +815,26 @@ public sealed class DbgEngManager : IDisposable
         _eventCallbacks.EnqueueError(EngineWedgedMessage);
     }
 
-    private void ExitWait()
+    /// <summary>
+    /// Makes the pump's WaitForEvent(INFINITE) return so a queued work item can run.
+    /// With a live target that is a break-in (ACTIVE): the pump classifies it as its
+    /// own yield and resumes the target. DEBUG_INTERRUPT_EXIT is only ever sent to a
+    /// target-less wait: on a running target it was observed twice (live runs 14 and
+    /// 16) to leave the engine wait unresponsive to every later break-in, with the
+    /// guest halted in the debugger and nothing able to free the engine thread.
+    /// </summary>
+    private void WakeEngineThread()
     {
         try
         {
+        if (!EngineHasNoDebuggee)
+        {
+            RequestInterrupt();
+            return;
+        }
+
             var hr = _client?.Control.TrySetInterrupt(DEBUG_INTERRUPT.EXIT);
-            _logger.LogInformation("SetInterrupt(EXIT) -> {Hr}", hr);
+            _logger.LogInformation("SetInterrupt(EXIT) -> {Hr} (no debuggee)", hr);
         }
         catch (Exception ex)
         {
