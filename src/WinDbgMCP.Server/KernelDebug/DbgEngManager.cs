@@ -1084,10 +1084,12 @@ public sealed class DbgEngManager : IDisposable
     }
 
     /// <summary>
-    /// Server shutdown. The detach has to run on the engine thread (dbgeng has
-    /// thread affinity; from here it silently did nothing and a target halted at a
-    /// break stayed frozen after the MCP client restarted the server - seen live).
-    /// ACTIVE_DETACH resumes a halted kernel, so the guest keeps running.
+    /// Server shutdown. Uses the full kd_disconnect sequence: a bare
+    /// EndSession(ACTIVE_DETACH) on a target halted at a breakpoint reports
+    /// GO_HANDLED but does not actually resume the kernel (seen live twice: the
+    /// guest stayed frozen after the MCP client restarted the server), whereas
+    /// GO dispatched by the pump followed by a yield + detach is verified to
+    /// leave the guest running.
     /// </summary>
     public void Dispose()
     {
@@ -1099,14 +1101,8 @@ public sealed class DbgEngManager : IDisposable
 
         try
         {
-            WakeEngineThread();
-            _thread.ExecuteAsync(() =>
-            {
-                _thread.PumpEnabled = false;
-                try { _client?.TryEndSession(DEBUG_END.ACTIVE_DETACH); } catch { }
-                _client = null;
-                _logger.LogInformation("Detached from kernel debugger on shutdown.");
-            }, ThreadGrabTimeout).GetAwaiter().GetResult();
+            var result = DisconnectAsync().GetAwaiter().GetResult();
+            _logger.LogInformation("Shutdown detach: {Message}", result.Message);
         }
         catch (Exception ex)
         {
