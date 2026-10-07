@@ -3,6 +3,7 @@ using System.Text.RegularExpressions;
 using ModelContextProtocol.Server;
 using WinDbgMCP.Server.Guest;
 using WinDbgMCP.Server.KernelDebug;
+using WinDbgMCP.Server.KernelDebug.Models;
 using WinDbgMCP.Server.State;
 
 namespace WinDbgMCP.Server.Tools;
@@ -32,7 +33,16 @@ public static class GuestTools
             var note = "";
             if (state.State.KdConnected && RestartCommand.IsMatch(command))
             {
-                try { await dbgEng.DisconnectAsync(); } catch { state.CleanupKdSession?.Invoke(); }
+                DetachResult detach;
+                try { detach = await dbgEng.DisconnectAsync(); }
+                catch (Exception ex) { detach = new DetachResult(false, $"{ex.GetType().Name}: {ex.Message}"); }
+
+                if (!detach.Detached)
+                    return "NOT EXECUTED: this command restarts or shuts down the guest, and the kernel " +
+                           "debugger could not be detached first (" + detach.Message + "). Restarting with the " +
+                           "debugger attached would leave the debug session unusable until the MCP server is " +
+                           "restarted. Call get_system_state, then kd_disconnect, and retry the command.";
+
                 state.SetKdDisconnected();
                 note = "Kernel debugger detached before the guest restart (a graceful restart does not " +
                        "re-attach to an existing session). Call kd_connect once the OS is back up.\n";

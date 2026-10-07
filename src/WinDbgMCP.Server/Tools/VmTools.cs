@@ -2,6 +2,7 @@ using System.ComponentModel;
 using ModelContextProtocol.Server;
 using WinDbgMCP.Server.Configuration;
 using WinDbgMCP.Server.KernelDebug;
+using WinDbgMCP.Server.KernelDebug.Models;
 using WinDbgMCP.Server.State;
 using WinDbgMCP.Server.Vmware;
 
@@ -53,10 +54,26 @@ public static class VmTools
             {
                 // Detach the kernel debugger first so the dying session's events
                 // don't surface later as unexpected SessionEnded/Error alerts.
+                var kdNote = "";
                 if (state.State.KdConnected)
                 {
-                    try { await dbgEng.DisconnectAsync(); }
-                    catch { state.CleanupKdSession?.Invoke(); } // drop the client; the VM is going away anyway
+                    DetachResult detach;
+                    try { detach = await dbgEng.DisconnectAsync(); }
+                    catch (Exception ex) { detach = new DetachResult(false, $"{ex.GetType().Name}: {ex.Message}"); }
+
+                    if (!detach.Detached && !hard)
+                        return "NOT EXECUTED: a graceful vm_stop restarts the guest OS, and the kernel debugger " +
+                               "could not be detached first (" + detach.Message + "). Call get_system_state, then " +
+                               "kd_disconnect, and retry; or use vm_stop(hard=true).";
+
+                    if (!detach.Detached)
+                    {
+                        // Hard power-off: the target dies anyway; drop the client so the
+                        // state is at least consistent, and say what that costs.
+                        state.CleanupKdSession?.Invoke();
+                        kdNote = " WARNING: the kernel debugger could not be detached cleanly before the power-off (" +
+                                 detach.Message + "); kernel-debug tools may need an MCP server restart.";
+                    }
                     state.SetKdDisconnected();
                 }
 
@@ -65,7 +82,7 @@ public static class VmTools
                     return $"vm_stop failed: {result.Message}";
 
                 state.SetVmPowerChangedByTool(VmPowerState.Off);
-                return result.Message;
+                return result.Message + kdNote;
             }
             catch (TimeoutException)
             {
@@ -147,15 +164,19 @@ public static class VmTools
                 // Step 1: Clean KD disconnect BEFORE restore while KDNET is still alive.
                 // This avoids the race condition where the snapshot restore kills the
                 // KDNET connection while DbgEng is mid-operation on its dedicated thread.
+                var kdNote = "";
                 if (wasKdConnected)
                 {
-                    try
+                    // Best-effort: the restore replaces the target anyway, but a session
+                    // the engine would not release has to be dropped and reported.
+                    DetachResult detach;
+                    try { detach = await dbgEng.DisconnectAsync(); }
+                    catch (Exception ex) { detach = new DetachResult(false, $"{ex.GetType().Name}: {ex.Message}"); }
+                    if (!detach.Detached)
                     {
-                        await dbgEng.DisconnectAsync();
-                    }
-                    catch
-                    {
-                        // Best-effort — if disconnect fails the restore still proceeds
+                        state.CleanupKdSession?.Invoke();
+                        kdNote = " WARNING: the kernel debugger could not be detached cleanly before the restore (" +
+                                 detach.Message + "); if kd_connect now fails, restart the MCP server.";
                     }
                     state.SetKdDisconnected();
                 }
@@ -177,9 +198,9 @@ public static class VmTools
                 // Step 4: Reset all state (safe — KD already disconnected above)
                 state.ResetAllState(powerState);
 
-                var statusMsg = powerState == VmPowerState.Running
+                var statusMsg = (powerState == VmPowerState.Running
                     ? $"Snapshot '{name}' restored and VM is running."
-                    : $"Snapshot '{name}' restored but VM is {powerState}. Call vm_start to start it.";
+                    : $"Snapshot '{name}' restored but VM is {powerState}. Call vm_start to start it.") + kdNote;
 
                 // Step 5: If KD was connected before, attempt transparent reconnect
                 if (wasKdConnected && powerState == VmPowerState.Running)
@@ -231,7 +252,12 @@ public static class VmTools
             // Cleanly disconnect KD if connected — it was pointing at the old VM
             if (wasKdConnected)
             {
-                try { await dbgEng.DisconnectAsync(); } catch { }
+                DetachResult detach;
+                try { detach = await dbgEng.DisconnectAsync(); }
+                catch (Exception ex) { detach = new DetachResult(false, $"{ex.GetType().Name}: {ex.Message}"); }
+                if (!detach.Detached)
+                    return "NOT EXECUTED: the kernel debugger is attached to the current VM and could not be " +
+                           "detached (" + detach.Message + "). Call get_system_state, then kd_disconnect, and retry.";
                 state.SetKdDisconnected();
             }
 

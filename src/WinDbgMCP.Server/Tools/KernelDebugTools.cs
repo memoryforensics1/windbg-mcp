@@ -68,14 +68,22 @@ public static class KernelDebugTools
             try
             {
                 var result = await dbgEng.DisconnectAsync();
-                state.SetKdDisconnected();
-                return result;
+                if (result.Detached)
+                    state.SetKdDisconnected();
+                return result.Detached
+                    ? result.Message
+                    : "NOT DETACHED: " + result.Message + " The debugger is still connected.";
             }
             catch (Exception ex)
             {
-                // Even if disconnect throws, mark as disconnected
-                state.SetKdDisconnected();
-                return $"kd_disconnect completed with error: {ex.GetType().Name}: {ex.Message}";
+                // Only report what is true: the session is gone only if the engine
+                // really dropped its client.
+                if (!dbgEng.IsConnected)
+                    state.SetKdDisconnected();
+                return $"kd_disconnect failed: {ex.GetType().Name}: {ex.Message}. " +
+                       (dbgEng.IsConnected
+                           ? "The debugger is still connected; call get_system_state and retry."
+                           : "The session is gone; call kd_connect to attach again.");
             }
         });
     }

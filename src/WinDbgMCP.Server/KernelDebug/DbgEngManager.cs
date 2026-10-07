@@ -245,10 +245,10 @@ public sealed class DbgEngManager : IDisposable
     /// Returns <c>Detached == false</c> when the session is still live; callers
     /// must then keep treating the debugger as connected.
     /// </summary>
-    public async Task<string> DisconnectAsync()
+    public async Task<DetachResult> DisconnectAsync()
     {
         if (_client == null)
-            return "Not connected.";
+            return new DetachResult(true, "Not connected.");
 
         // Step 1: If target is at BREAK, resume it by setting GO and letting
         // the event pump dispatch it (kernel targets need INFINITE waits, and the
@@ -280,10 +280,11 @@ public sealed class DbgEngManager : IDisposable
         catch (OperationCanceledException)
         {
             if (!EngineHasNoDebuggee)
-                return "kd_disconnect could not get hold of the engine thread in time; the target is still " +
-                       "attached. Try kd_disconnect again.";
+                return new DetachResult(false,
+                    "kd_disconnect could not get hold of the engine thread in time; the target is still " +
+                    "attached. Try kd_disconnect again.");
             MarkEngineWedged();
-            return "Disconnected. " + EngineWedgedMessage;
+            return new DetachResult(true, "Disconnected. " + EngineWedgedMessage);
         }
 
         if (needsResume)
@@ -310,16 +311,17 @@ public sealed class DbgEngManager : IDisposable
 
                 _client = null;
                 _logger.LogInformation("Disconnected from kernel debugger.");
-                return "Disconnected from kernel debugger. Target has been resumed.";
+                return new DetachResult(true, "Disconnected from kernel debugger. Target has been resumed.");
             }, ThreadGrabTimeout + TimeSpan.FromSeconds(5));
         }
         catch (OperationCanceledException)
         {
             if (!EngineHasNoDebuggee)
-                return "kd_disconnect could not get hold of the engine thread in time; the target may still " +
-                       "be attached. Call get_system_state, then try kd_disconnect again.";
+                return new DetachResult(false,
+                    "kd_disconnect could not get hold of the engine thread in time; the target is still " +
+                    "attached. Call get_system_state, then try kd_disconnect again.");
             MarkEngineWedged();
-            return "Disconnected. " + EngineWedgedMessage;
+            return new DetachResult(true, "Disconnected. " + EngineWedgedMessage);
         }
     }
 
@@ -825,14 +827,14 @@ public sealed class DbgEngManager : IDisposable
     /// </summary>
     private void WakeEngineThread()
     {
-        try
-        {
         if (!EngineHasNoDebuggee)
         {
             RequestInterrupt();
             return;
         }
 
+        try
+        {
             var hr = _client?.Control.TrySetInterrupt(DEBUG_INTERRUPT.EXIT);
             _logger.LogInformation("SetInterrupt(EXIT) -> {Hr} (no debuggee)", hr);
         }
