@@ -1083,21 +1083,34 @@ public sealed class DbgEngManager : IDisposable
         // _disposed intentionally NOT set — manager remains usable
     }
 
+    /// <summary>
+    /// Server shutdown. The detach has to run on the engine thread (dbgeng has
+    /// thread affinity; from here it silently did nothing and a target halted at a
+    /// break stayed frozen after the MCP client restarted the server - seen live).
+    /// ACTIVE_DETACH resumes a halted kernel, so the guest keeps running.
+    /// </summary>
     public void Dispose()
     {
         if (_disposed) return;
         _disposed = true;
 
-        _thread.PumpEnabled = false;
+        if (_client == null)
+            return;
 
         try
         {
-            if (_client != null)
+            WakeEngineThread();
+            _thread.ExecuteAsync(() =>
             {
-                _client.TryEndSession(DEBUG_END.ACTIVE_DETACH);
+                _thread.PumpEnabled = false;
+                try { _client?.TryEndSession(DEBUG_END.ACTIVE_DETACH); } catch { }
                 _client = null;
-            }
+                _logger.LogInformation("Detached from kernel debugger on shutdown.");
+            }, ThreadGrabTimeout).GetAwaiter().GetResult();
         }
-        catch { }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Could not detach cleanly on shutdown; the target may be left halted");
+        }
     }
 }
