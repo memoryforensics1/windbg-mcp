@@ -95,7 +95,9 @@ public sealed class StateCoordinator
                 _logger.LogWarning(ex, "Tool {Tool} threw", toolName);
                 result = $"{toolName} failed: {ex.GetType().Name}: {ex.Message}";
             }
-            if (precheck != null)
+            // A precheck warning ("...Proceeding.") must not prefix a body that
+            // decided not to proceed after all.
+            if (precheck != null && !result.StartsWith("NOT EXECUTED", StringComparison.Ordinal))
                 result = precheck.Message + " " + result;
         }
 
@@ -313,6 +315,20 @@ public sealed class StateCoordinator
                 _state.KdBreakReason = null;
             }
             _state.KdRebootDetected = rebooted;
+        }
+        else if (_state.KdConnected && IsDbgEngConnected?.Invoke() == false)
+        {
+            // The engine dropped its client after the tool that was detaching gave
+            // up (its work item finished past the deadline). Reconcile, and say so.
+            _logger.LogWarning("Kernel debugger client is gone while the state said connected; reconciling");
+            _alerts.Add("KERNEL DEBUGGER DETACHED: the engine released its session after the last call " +
+                        "reported a timeout. Call kd_connect if you need the debugger.");
+            _state.KdConnected = false;
+            _state.KdExecStatus = DebugExecutionStatus.NoDebuggee;
+            _state.KdBreakReason = null;
+            _state.IsBugcheck = false;
+            _state.BugcheckCode = null;
+            _state.KdRebootDetected = false;
         }
 
         // 2. Event queue count

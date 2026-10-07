@@ -272,8 +272,8 @@ public static class KernelDebugTools
                 // Don't assert "still running": during a reboot the engine has no
                 // debuggee and the wait couldn't be woken before the outer timeout.
                 return $"Wait returned after {timeoutSeconds}s without reaching the engine wait. " +
-                       "The target is busy or rebooting. Call get_system_state to see the real state, " +
-                       "then kd_wait_for_event again or kd_break.";
+                       "The target is busy or rebooting; kernel tools queue behind it until it is back. " +
+                       "Poll get_system_state (it shows TARGET REBOOTED when the kernel re-attaches).";
             }
             catch (Exception ex)
             {
