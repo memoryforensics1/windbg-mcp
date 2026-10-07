@@ -394,6 +394,33 @@ public sealed class VmwareManager
     }
 
     // ═══════════════════════════════════════════════════════════════
+    //  SHARED FOLDERS (fast file transfer via HGFS)
+    // ═══════════════════════════════════════════════════════════════
+
+    public async Task<ProcessResult> EnableSharedFoldersAsync(CancellationToken ct = default)
+    {
+        return await RunVmrunAsync(
+            $"-T ws enableSharedFolders \"{_vmxPath}\"",
+            TimeSpan.FromSeconds(_timeouts.VmToolsCheckSeconds), ct);
+    }
+
+    public async Task<ProcessResult> AddSharedFolderAsync(
+        string shareName, string hostPath, CancellationToken ct = default)
+    {
+        return await RunVmrunAsync(
+            $"-T ws addSharedFolder \"{_vmxPath}\" \"{shareName}\" \"{hostPath}\"",
+            TimeSpan.FromSeconds(_timeouts.VmToolsCheckSeconds), ct);
+    }
+
+    public async Task<ProcessResult> RemoveSharedFolderAsync(
+        string shareName, CancellationToken ct = default)
+    {
+        return await RunVmrunAsync(
+            $"-T ws removeSharedFolder \"{_vmxPath}\" \"{shareName}\"",
+            TimeSpan.FromSeconds(_timeouts.VmToolsCheckSeconds), ct);
+    }
+
+    // ═══════════════════════════════════════════════════════════════
     //  INTERNAL: vmrun process execution
     // ═══════════════════════════════════════════════════════════════
 

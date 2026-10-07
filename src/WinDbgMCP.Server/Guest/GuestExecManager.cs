@@ -143,45 +143,236 @@ public sealed class GuestExecManager
         }
     }
 
+    private const long LargeFileThreshold = 50 * 1024 * 1024; // 50 MB
+
     /// <summary>
     /// Copy a file from the host to the guest VM.
+    /// Small files use vmrun copyFile; large files (>=50MB) use VMware shared folders
+    /// (HGFS) which is the same fast mechanism as drag-and-drop.
     /// </summary>
     public async Task<string> CopyFileToGuestAsync(
         string hostPath, string guestPath, CancellationToken ct = default)
     {
+        hostPath = Path.GetFullPath(hostPath);
         if (!File.Exists(hostPath))
             return $"Host file not found: {hostPath}";
+
+        var fileSize = new FileInfo(hostPath).Length;
+
+        if (fileSize >= LargeFileThreshold)
+        {
+            var shareResult = await CopyToGuestViaShareAsync(hostPath, guestPath, fileSize, ct);
+            if (shareResult != null)
+                return shareResult;
+            _logger.LogWarning("Shared folder transfer failed, falling back to vmrun copyFile");
+        }
 
         var result = await _vmware.CopyFileToGuestAsync(hostPath, guestPath, ct);
         if (!result.Success)
             return $"File transfer failed: {result.Stderr}";
 
-        var fileSize = new FileInfo(hostPath).Length;
         return $"Copied {hostPath} -> guest:{guestPath} ({fileSize:N0} bytes)";
     }
 
     /// <summary>
     /// Copy a file from the guest VM to the host.
+    /// Asks the guest for the file size first: large files (>=50MB) go through a
+    /// VMware shared folder straight away (vmrun copyFile runs at ~2 MB/s and its
+    /// timeout would kill the copy and leave a partial file); small files use vmrun
+    /// copyFile, with the shared folder as the fallback for any failure including a
+    /// timeout. A failed copy never leaves a partial file on the host.
     /// </summary>
     public async Task<string> CopyFileFromGuestAsync(
         string guestPath, string hostPath, CancellationToken ct = default)
     {
-        // Ensure host directory exists
+        hostPath = Path.GetFullPath(hostPath);
         var hostDir = Path.GetDirectoryName(hostPath);
         if (!string.IsNullOrEmpty(hostDir) && !Directory.Exists(hostDir))
             Directory.CreateDirectory(hostDir);
 
-        var result = await _vmware.CopyFileFromGuestAsync(guestPath, hostPath, ct);
-        if (!result.Success)
-            return $"File transfer failed: {result.Stderr}";
+        var guestSize = await GetGuestFileSizeAsync(guestPath, ct);
+        if (guestSize == null)
+            return $"Guest file not found: {guestPath}";
 
-        if (File.Exists(hostPath))
+        if (guestSize >= LargeFileThreshold)
         {
-            var fileSize = new FileInfo(hostPath).Length;
-            return $"Copied guest:{guestPath} -> {hostPath} ({fileSize:N0} bytes)";
+            var shareFirst = await CopyFromGuestViaShareAsync(guestPath, hostPath, ct);
+            if (shareFirst != null)
+                return shareFirst;
+            _logger.LogWarning("Shared folder transfer failed, falling back to vmrun copyFile");
         }
 
-        return $"Transfer completed but file not found at {hostPath}";
+        string failure;
+        try
+        {
+            var result = await _vmware.CopyFileFromGuestAsync(guestPath, hostPath, ct);
+            if (result.Success && File.Exists(hostPath) && new FileInfo(hostPath).Length == guestSize)
+                return $"Copied guest:{guestPath} -> {hostPath} ({guestSize:N0} bytes)";
+            failure = result.Success ? "incomplete copy" : result.Stderr.Trim();
+        }
+        catch (TimeoutException)
+        {
+            failure = "vmrun copyFile timed out";
+        }
+        DeletePartialFile(hostPath);
+
+        _logger.LogWarning("vmrun copyFile failed ({Reason}), trying shared folder", failure);
+        var shareResult = await CopyFromGuestViaShareAsync(guestPath, hostPath, ct);
+        if (shareResult != null)
+            return shareResult;
+
+        return $"File transfer failed: {failure}";
+    }
+
+    /// <summary>Size of a guest file in bytes, or null if it does not exist.</summary>
+    private async Task<long?> GetGuestFileSizeAsync(string guestPath, CancellationToken ct)
+    {
+        // Runs inside a .bat (RunCommandAsync), hence %%I rather than %I.
+        var sizeResult = await RunCommandAsync(
+            $"for %%I in (\"{guestPath}\") do @echo %%~zI", timeoutSeconds: 30, ct: ct);
+        if (!sizeResult.Success || sizeResult.ExitCode != 0)
+            return null;
+        var line = sizeResult.Stdout.Trim().Split('\n').LastOrDefault()?.Trim();
+        return long.TryParse(line, out var size) ? size : null;
+    }
+
+    private void DeletePartialFile(string hostPath)
+    {
+        try { if (File.Exists(hostPath)) File.Delete(hostPath); }
+        catch (Exception ex) { _logger.LogDebug(ex, "Could not delete partial file {Path}", hostPath); }
+    }
+
+    /// <summary>
+    /// Transfer host→guest via a temporary VMware shared folder.
+    /// Stages through an isolated temp directory so only the target file is exposed to the guest.
+    /// Returns the success message, or null if shared folders aren't available.
+    /// </summary>
+    private async Task<string?> CopyToGuestViaShareAsync(
+        string hostPath, string guestPath, long fileSize, CancellationToken ct)
+    {
+        var guid = Guid.NewGuid().ToString("N")[..8];
+        var shareName = $"mcp_{guid}";
+        var stagingDir = Path.Combine(Path.GetTempPath(), $"mcp_xfer_{guid}");
+        var fileName = Path.GetFileName(hostPath);
+
+        try
+        {
+            Directory.CreateDirectory(stagingDir);
+            var stagedFile = Path.Combine(stagingDir, fileName);
+            File.Copy(hostPath, stagedFile, overwrite: true);
+
+            var enableResult = await _vmware.EnableSharedFoldersAsync(ct);
+            if (!enableResult.Success)
+                return null;
+
+            var addResult = await _vmware.AddSharedFolderAsync(shareName, stagingDir, ct);
+            if (!addResult.Success)
+                return null;
+
+            try
+            {
+                var guestDir = Path.GetDirectoryName(guestPath);
+                if (!string.IsNullOrEmpty(guestDir))
+                    await _vmware.CreateDirectoryInGuestAsync(guestDir, ct);
+
+                var uncPath = $@"\\vmware-host\Shared Folders\{shareName}\{fileName}";
+                var copyResult = await RunCommandAsync(
+                    $"copy /y \"{uncPath}\" \"{guestPath}\"", timeoutSeconds: 600, ct: ct);
+
+                if (!copyResult.Success || copyResult.ExitCode != 0)
+                {
+                    _logger.LogWarning("Shared folder copy failed: {Err}",
+                        copyResult.Success ? copyResult.Stderr : copyResult.ErrorMessage);
+                    return null;
+                }
+
+                return $"Copied {hostPath} -> guest:{guestPath} ({fileSize:N0} bytes) [via shared folder]";
+            }
+            finally
+            {
+                try { await _vmware.RemoveSharedFolderAsync(shareName, ct); }
+                catch (Exception ex) { _logger.LogDebug(ex, "Failed to remove shared folder {Name}", shareName); }
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Shared folder transfer failed");
+            return null;
+        }
+        finally
+        {
+            try { if (Directory.Exists(stagingDir)) Directory.Delete(stagingDir, recursive: true); }
+            catch { }
+        }
+    }
+
+    /// <summary>
+    /// Transfer guest→host via a temporary VMware shared folder.
+    /// Stages through an isolated temp directory so the guest can only write to that directory.
+    /// Returns the success message, or null if shared folders aren't available.
+    /// </summary>
+    private async Task<string?> CopyFromGuestViaShareAsync(
+        string guestPath, string hostPath, CancellationToken ct)
+    {
+        var guid = Guid.NewGuid().ToString("N")[..8];
+        var shareName = $"mcp_{guid}";
+        var stagingDir = Path.Combine(Path.GetTempPath(), $"mcp_xfer_{guid}");
+        var fileName = Path.GetFileName(hostPath);
+
+        try
+        {
+            Directory.CreateDirectory(stagingDir);
+
+            var enableResult = await _vmware.EnableSharedFoldersAsync(ct);
+            if (!enableResult.Success)
+                return null;
+
+            var addResult = await _vmware.AddSharedFolderAsync(shareName, stagingDir, ct);
+            if (!addResult.Success)
+                return null;
+
+            try
+            {
+                var uncPath = $@"\\vmware-host\Shared Folders\{shareName}\{fileName}";
+                var copyResult = await RunCommandAsync(
+                    $"copy /y \"{guestPath}\" \"{uncPath}\"", timeoutSeconds: 600, ct: ct);
+
+                if (!copyResult.Success || copyResult.ExitCode != 0)
+                {
+                    _logger.LogWarning("Shared folder copy failed: {Err}",
+                        copyResult.Success ? copyResult.Stderr : copyResult.ErrorMessage);
+                    return null;
+                }
+
+                var stagedFile = Path.Combine(stagingDir, fileName);
+                if (!File.Exists(stagedFile))
+                    return null;
+
+                var hostDir = Path.GetDirectoryName(hostPath);
+                if (!string.IsNullOrEmpty(hostDir) && !Directory.Exists(hostDir))
+                    Directory.CreateDirectory(hostDir);
+
+                File.Move(stagedFile, hostPath, overwrite: true);
+
+                var fileSize = new FileInfo(hostPath).Length;
+                return $"Copied guest:{guestPath} -> {hostPath} ({fileSize:N0} bytes) [via shared folder]";
+            }
+            finally
+            {
+                try { await _vmware.RemoveSharedFolderAsync(shareName, ct); }
+                catch (Exception ex) { _logger.LogDebug(ex, "Failed to remove shared folder {Name}", shareName); }
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Shared folder transfer failed");
+            return null;
+        }
+        finally
+        {
+            try { if (Directory.Exists(stagingDir)) Directory.Delete(stagingDir, recursive: true); }
+            catch { }
+        }
     }
 
     /// <summary>
