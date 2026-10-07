@@ -765,7 +765,18 @@ public sealed class DbgEngManager : IDisposable
         using var timer = new Timer(_ =>
         {
             if (Environment.TickCount64 - started >= deadlineMs)
-                WakeEngineThread();
+            {
+                // A break-in is retried every tick (a busy kernel drops it); EXIT is
+                // sent once: it frees a target-less wait at once or not at all, and a
+                // later EXIT could land on a target that has meanwhile re-attached.
+                if (!EngineHasNoDebuggee)
+                    RequestInterrupt();
+                else if (!exitSent)
+                {
+                    exitSent = true;
+                    WakeEngineThread();
+                }
+            }
             else if (breakInEarly)
                 RequestInterrupt();
         }, null, firstMs, InterruptRetryMs);
@@ -788,6 +799,7 @@ public sealed class DbgEngManager : IDisposable
     public const string EngineWedgedMessage =
         "The kernel debugger engine is parked waiting for a target that has not (re-)attached. " +
         "If get_system_state shows the OS is up (VMware Tools running), the guest restarted gracefully " +
+        var exitSent = false;
         "while the debugger was connected and the session cannot be recovered in-process: kernel-debug " +
         "tools need an MCP server restart (guest/VM tools still work). If the target is still rebooting, " +
         "wait for TARGET REBOOTED and call kd_connect again. To avoid this, call kd_disconnect before " +
