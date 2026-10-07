@@ -26,6 +26,26 @@ public sealed class DbgEngThread : IDisposable
     /// </summary>
     public volatile bool PumpEnabled;
 
+    /// <summary>
+    /// The work item currently executing on the engine thread, if any. A tool
+    /// whose item timed out while *running* keeps running here (dbgeng cannot
+    /// cancel a command); later items wait behind it and are told so.
+    /// </summary>
+    private volatile WorkItem? _current;
+    private long _currentStartedTicks;
+
+    /// <summary>Label of the item running past some tool's timeout, with its running time; null when idle.</summary>
+    public string? BusyDescription
+    {
+        get
+        {
+            var cur = _current;
+            if (cur == null || !cur.OutlivedTimeout) return null;
+            var secs = (Environment.TickCount64 - Interlocked.Read(ref _currentStartedTicks)) / 1000;
+            return $"'{cur.Label}' (running for {secs} s)";
+        }
+    }
+
     public DbgEngThread(ILogger logger)
     {
         _logger = logger;
@@ -49,6 +69,8 @@ public sealed class DbgEngThread : IDisposable
                 // Priority 1: Process any queued tool calls
                 if (_workQueue.TryTake(out var work, TimeSpan.FromMilliseconds(0)))
                 {
+                    Interlocked.Exchange(ref _currentStartedTicks, Environment.TickCount64);
+                    _current = work;
                     try
                     {
                         work.Execute();
@@ -57,6 +79,10 @@ public sealed class DbgEngThread : IDisposable
                     {
                         _logger.LogError(ex, "Work item failed on DbgEng thread");
                         work.SetException(ex);
+                    }
+                    finally
+                    {
+                        _current = null;
                     }
                     continue;
                 }
@@ -90,15 +116,16 @@ public sealed class DbgEngThread : IDisposable
     /// <summary>
     /// Execute a function on the DbgEng thread and return the result.
     /// </summary>
-    public Task<T> ExecuteAsync<T>(Func<T> work, TimeSpan timeout)
+    public Task<T> ExecuteAsync<T>(Func<T> work, TimeSpan timeout, string? label = null)
     {
         if (_disposed)
             throw new ObjectDisposedException(nameof(DbgEngThread));
 
         var tcs = new TaskCompletionSource<T>(TaskCreationOptions.RunContinuationsAsynchronously);
         var cts = new CancellationTokenSource(timeout);
+        WorkItem? item = null;
 
-        var item = new WorkItem(() =>
+        item = new WorkItem(() =>
         {
             if (cts.IsCancellationRequested)
             {
@@ -115,10 +142,29 @@ public sealed class DbgEngThread : IDisposable
             {
                 tcs.TrySetException(ex);
             }
-        });
+        }, label ?? "an engine operation");
 
-        // Register timeout cancellation
-        cts.Token.Register(() => tcs.TrySetCanceled(), useSynchronizationContext: false);
+        // Timeout: if another item is the one occupying the thread, say so rather
+        // than reporting a bare timeout - the caller's work never even started.
+        cts.Token.Register(() =>
+        {
+            var cur = _current;
+            if (cur == item)
+            {
+                cur.OutlivedTimeout = true;
+                tcs.TrySetCanceled();
+            }
+            else if (cur != null)
+            {
+                cur.OutlivedTimeout = true;
+                var secs = (Environment.TickCount64 - Interlocked.Read(ref _currentStartedTicks)) / 1000;
+                tcs.TrySetException(new EngineBusyException(cur.Label, secs));
+            }
+            else
+            {
+                tcs.TrySetCanceled();
+            }
+        }, useSynchronizationContext: false);
 
         _workQueue.Add(item);
         return tcs.Task;
@@ -127,9 +173,9 @@ public sealed class DbgEngThread : IDisposable
     /// <summary>
     /// Execute a void action on the DbgEng thread.
     /// </summary>
-    public Task ExecuteAsync(Action work, TimeSpan timeout)
+    public Task ExecuteAsync(Action work, TimeSpan timeout, string? label = null)
     {
-        return ExecuteAsync<object?>(() => { work(); return null; }, timeout);
+        return ExecuteAsync<object?>(() => { work(); return null; }, timeout, label);
     }
 
     public void Dispose()
@@ -152,7 +198,14 @@ public sealed class DbgEngThread : IDisposable
         private readonly Action _action;
         private Exception? _exception;
 
-        public WorkItem(Action action) => _action = action;
+        public string Label { get; }
+        public volatile bool OutlivedTimeout;
+
+        public WorkItem(Action action, string label)
+        {
+            _action = action;
+            Label = label;
+        }
 
         public void Execute() => _action();
 

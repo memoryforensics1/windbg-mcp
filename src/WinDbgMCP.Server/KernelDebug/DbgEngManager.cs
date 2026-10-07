@@ -416,7 +416,7 @@ public sealed class DbgEngManager : IDisposable
                 return $"Command failed (0x{(int)hr:X8}): {output}";
 
             return string.IsNullOrWhiteSpace(output) ? "(no output)" : output;
-        }, timeout);
+        }, timeout, $"kd_execute {command}");
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -851,6 +851,9 @@ public sealed class DbgEngManager : IDisposable
         "(guest/VM tools still work). To avoid this, call kd_disconnect before restarting the guest.";
 
     public bool EngineWedged => _engineWedged;
+
+    /// <summary>What is still running on the engine thread past a tool timeout, or null.</summary>
+    public string? BusyDescription => _thread.BusyDescription;
     private volatile bool _engineWedged;
 
     private void MarkEngineWedged()

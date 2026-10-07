@@ -28,6 +28,10 @@ public sealed class SystemState
     // KeBugCheckEx yet (so IsBugcheck is false) but the next resume bugchecks the OS.
     public bool KdFatalExceptionPending { get; set; }
 
+    // A kd_execute that outlived its timeout is still running on the engine thread
+    // (e.g. "!analyze -v, running for 95 s"); every other kernel tool waits behind it.
+    public string? KdEngineBusyWith { get; set; }
+
     // Target rebooted since the last kd_continue; engine reconnected at the initial breakpoint
     public bool KdRebootDetected { get; set; }
 

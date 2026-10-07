@@ -76,6 +76,13 @@ public static class MetaTools
 
                 sb.AppendLine($"Pending Events:    {s.PendingEventCount}");
                 sb.AppendLine($"Wait Pending:      {s.KdWaitPending}");
+                if (s.KdEngineBusyWith != null)
+                {
+                    sb.AppendLine($"ENGINE BUSY:       {s.KdEngineBusyWith}");
+                    sb.AppendLine($"   A command that outlived its tool timeout is still running on the single debugger thread.");
+                    sb.AppendLine($"   Every kernel tool waits behind it (and times out) until it finishes; symbol loading can take");
+                    sb.AppendLine($"   minutes the first time. Wait and poll get_system_state; do not re-issue the command.");
+                }
             }
 
             var recent = state.GetRecentDebugEvents?.Invoke() ?? new();

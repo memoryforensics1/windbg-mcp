@@ -43,6 +43,8 @@ public sealed class StateCoordinator
     public Func<bool>? IsDbgEngConnected { get; set; }
     /// <summary>True while the engine thread is parked in a target-less wait that did not answer a probe.</summary>
     public Func<bool>? IsEngineParked { get; set; }
+    /// <summary>Describes the engine command still running past its tool timeout, or null when idle.</summary>
+    public Func<string?>? GetEngineBusy { get; set; }
     public Func<int>? GetPendingEventCount { get; set; }
     public Func<Task<(bool IsBugcheck, string? BugcheckCode, string? LastEvent)>>? DetectBugcheckAsync { get; set; }
     /// <summary>True while the current halt is a second-chance exception (the next resume bugchecks).</summary>
@@ -337,6 +339,7 @@ public sealed class StateCoordinator
 
         // 2. Event queue count
         _state.PendingEventCount = GetPendingEventCount?.Invoke() ?? 0;
+        _state.KdEngineBusyWith = _state.KdConnected ? GetEngineBusy?.Invoke() : null;
 
         // 2.5 BSOD detection — check once when transitioning INTO break state.
         // Skipped if a tool already flagged the bugcheck. A failed check (e.g. the
@@ -554,9 +557,6 @@ public sealed class StateCoordinator
     public void SetBsodProbed() => _bsodCheckedForCurrentBreak = true;
 
     /// <summary>
-    /// Update VM power state after a successful pause.
-    /// </summary>
-    /// <summary>
     /// A tool that ran the break probe itself (kd_break, kd_wait_for_event) hands
     /// over what it learned, so the refresh (which it just pre-empted) still has
     /// the Break Reason and the fatal-exception flag to show.
@@ -571,6 +571,9 @@ public sealed class StateCoordinator
             _alerts.Add(ErrorMessages.FatalExceptionPending(lastEvent));
     }
 
+    /// <summary>
+    /// Update VM power state after a successful pause.
+    /// </summary>
     public void SetVmPaused()
     {
         _state.VmPower = VmPowerState.Paused;

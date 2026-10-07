@@ -198,7 +198,10 @@ public static class KernelDebugTools
         "Execute any WinDbg command and return output. Target must be halted (at breakpoint). " +
         "Examples: 'k' (stack), 'r' (registers), 'lm' (modules), '!process 0 0', '!analyze -v', " +
         "'db addr' (memory), 'u addr' (disassemble), 'bp symbol' (set breakpoint). " +
-        "Execution-control commands (g, t, p, gu, wt) are BLOCKED — use kd_continue/kd_step instead.")]
+        "Execution-control commands (g, t, p, gu, wt) are BLOCKED — use kd_continue/kd_step instead. " +
+        "Symbol-loading commands (!analyze -v, first lm/k/.reload) can take minutes the first time: pass " +
+        "timeoutSeconds=300 for them. A command that outlives its timeout keeps running on the single " +
+        "debugger thread; other kernel tools then say the engine is busy until it finishes.")]
     public static Task<string> KdExecute(
         StateCoordinator state,
         DbgEngManager dbgEng,
@@ -222,8 +225,13 @@ public static class KernelDebugTools
             }
             catch (OperationCanceledException)
             {
-                return $"Command '{command}' timed out after {timeoutSeconds}s. " +
-                       "The command may be waiting for something. Try kd_break to interrupt.";
+                return $"Command '{command}' did not finish within {timeoutSeconds}s and is STILL RUNNING on the " +
+                       "debugger thread (a running engine command cannot be cancelled). Until it finishes every " +
+                       "other kernel tool reports the engine as busy, and get_system_state shows what is running. " +
+                       "Commands that load symbols (!analyze -v, the first lm/k/.reload) often take several minutes " +
+                       "on the first run. Do NOT re-issue the command: wait, poll get_system_state, and read the " +
+                       "output when it completes by running the same command again once the engine is idle " +
+                       "(symbols are cached by then, so it is fast).";
             }
             catch (Exception ex)
             {
