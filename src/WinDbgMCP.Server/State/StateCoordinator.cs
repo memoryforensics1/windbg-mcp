@@ -41,6 +41,8 @@ public sealed class StateCoordinator
     public Func<TimeSpan, Task<bool>>? AreToolsRunningAsync { get; set; }
     public Func<DebugExecutionStatus>? GetDbgEngExecutionStatus { get; set; }
     public Func<bool>? IsDbgEngConnected { get; set; }
+    /// <summary>True while the engine thread is parked in a target-less wait that did not answer a probe.</summary>
+    public Func<bool>? IsEngineParked { get; set; }
     public Func<int>? GetPendingEventCount { get; set; }
     public Func<Task<(bool IsBugcheck, string? BugcheckCode)>>? DetectBugcheckAsync { get; set; }
     public Func<bool>? IsRebootDetected { get; set; }
@@ -614,7 +616,15 @@ public sealed class StateCoordinator
             return ToolResult.Error(
                 $"VM is {_state.VmPower}. Start the VM first with vm_start.");
         if (_state.KdConnected)
+        {
+            // "Call kd_disconnect first" would send the model in a circle when the
+            // engine is parked: kd_disconnect is what just failed.
+            if (IsEngineParked?.Invoke() == true)
+                return ToolResult.Error(
+                    "Kernel debugger is still connected and the engine is parked. " +
+                    KernelDebug.DbgEngManager.EngineWedgedMessage);
             return ToolResult.Error(ErrorMessages.KdAlreadyConnected);
+        }
         return null;
     }
 

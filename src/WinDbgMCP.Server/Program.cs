@@ -68,6 +68,7 @@ builder.Services.AddSingleton<StateCoordinator>(sp =>
 
     // Wire up KD state delegates to DbgEngManager
     coordinator.IsDbgEngConnected = () => dbgEng.IsConnected;
+    coordinator.IsEngineParked = () => dbgEng.EngineWedged;
     coordinator.GetDbgEngExecutionStatus = () => dbgEng.GetExecutionStatus();
     coordinator.GetPendingEventCount = () => dbgEng.PendingEventCount;
     coordinator.DetectBugcheckAsync = () => dbgEng.DetectBugcheckAsync();
