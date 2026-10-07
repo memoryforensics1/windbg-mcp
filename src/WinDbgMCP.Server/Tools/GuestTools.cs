@@ -67,8 +67,8 @@ public static class GuestTools
     // quoted invocation still matches; the shutdown lookahead is bounded to the
     // current command segment ([^&|;]*) so a later "&& echo -l" cannot suppress it.
     private static readonly Regex RestartCommand = new(
-        @"(^|[\s&|;""'(\\])(" +
-        @"shutdown(\.exe)?\b(?![^&|;]*(/|-)(?:[alhi]\b|\?))|" +
+        @"(^|[\s&|;""'({\\])(" +
+        @"shutdown(\.exe)?\b(?![^&|;]*(?<=\s)(/|-)(?:[alhi](?=\s|$)|\?))|" +
         @"Restart-Computer\b|Stop-Computer\b|" +
         @"wmic\b[^&|;]*\bos\b[^&|;]*\b(reboot|shutdown)\b)" +
         @"|\bWin32Shutdown\b",

@@ -30,6 +30,10 @@ public class RestartCommandTests
     [InlineData("powershell (Get-WmiObject Win32_OperatingSystem).Win32Shutdown(6)")]
     // Chained after another command
     [InlineData("echo done && shutdown /r /t 0")]
+    // Script-block form and a comment that happens to contain a no-op-looking switch
+    [InlineData("powershell -Command \"& {Restart-Computer -Force}\"")]
+    [InlineData("shutdown /r /t 0 /c \"see -l\"")]
+    [InlineData("shutdown /r /t 0 /c \"a/l\"")]
     public void Matches_RestartCommands(string command)
         => Assert.True(GuestTools.IsRestartCommand(command), command);
 
