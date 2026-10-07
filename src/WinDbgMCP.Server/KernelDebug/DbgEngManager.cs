@@ -268,7 +268,13 @@ public sealed class DbgEngManager : IDisposable
                     var status = _client.Control.ExecutionStatus;
                     if (status == DEBUG_STATUS.BREAK)
                     {
-                        _client.Control.TrySetExecutionStatus(DEBUG_STATUS.GO);
+                        // Same rule as kd_continue: a second-chance exception must be
+                        // handed back to the kernel (gn), or a plain GO re-faults and
+                        // the detach below then delivers it anyway - as a BSOD right
+                        // after "Target has been resumed".
+                        var unhandled = _eventCallbacks.SecondChancePending;
+                        _eventCallbacks.ClearSecondChancePending();
+                        _client.Control.TrySetExecutionStatus(unhandled ? DEBUG_STATUS.GO_NOT_HANDLED : DEBUG_STATUS.GO);
                         _thread.PumpEnabled = true;
                         return true;
                     }
