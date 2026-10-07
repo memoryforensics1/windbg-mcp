@@ -76,7 +76,7 @@ public static class MetaTools
             var recent = state.GetRecentDebugEvents?.Invoke() ?? new();
             if (recent.Count > 0)
             {
-                sb.AppendLine($"Recent Debug Events (last {recent.Count}, oldest first; may include those in the banner above):");
+                sb.AppendLine($"Recent Debug Events (last {recent.Count} important ones, oldest first; module/process/thread events omitted; may include those in the banner above):");
                 foreach (var evt in recent)
                     sb.AppendLine($"   {evt}");
             }

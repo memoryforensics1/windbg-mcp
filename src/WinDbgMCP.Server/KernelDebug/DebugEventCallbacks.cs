@@ -344,14 +344,24 @@ public sealed class DebugEventCallbacks : DebugBaseEventCallbacks
         var events = new List<DebugEvent>();
         while (events.Count < maxCount && _eventQueue.TryDequeue(out var evt))
         {
-            _recentEvents.Enqueue(evt);
-            while (_recentEvents.Count > RecentEventCapacity)
-                _recentEvents.TryDequeue(out _);
+            // The ring is the model's memory of what mattered; a post-boot flood of
+            // module loads must not evict the bugcheck or reboot that preceded it.
+            if (!IsInformational(evt.Type))
+            {
+                _recentEvents.Enqueue(evt);
+                while (_recentEvents.Count > RecentEventCapacity)
+                    _recentEvents.TryDequeue(out _);
+            }
             events.Add(evt);
         }
         return events;
     }
 
-    /// <summary>Last events handed out by DrainEvents, oldest first.</summary>
+    public static bool IsInformational(DebugEventKind kind) => kind is
+        DebugEventKind.ModuleLoaded or DebugEventKind.ModuleUnloaded or
+        DebugEventKind.ProcessCreated or DebugEventKind.ProcessExited or
+        DebugEventKind.ThreadCreated or DebugEventKind.ThreadExited;
+
+    /// <summary>Last important events handed out by DrainEvents, oldest first.</summary>
     public List<DebugEvent> RecentEvents => _recentEvents.ToList();
 }
