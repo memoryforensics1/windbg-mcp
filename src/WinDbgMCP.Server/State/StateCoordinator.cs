@@ -556,6 +556,21 @@ public sealed class StateCoordinator
     /// <summary>
     /// Update VM power state after a successful pause.
     /// </summary>
+    /// <summary>
+    /// A tool that ran the break probe itself (kd_break, kd_wait_for_event) hands
+    /// over what it learned, so the refresh (which it just pre-empted) still has
+    /// the Break Reason and the fatal-exception flag to show.
+    /// </summary>
+    public void SetBsodProbed(string? lastEvent, bool fatalExceptionPending)
+    {
+        _bsodCheckedForCurrentBreak = true;
+        if (lastEvent != null && !_state.KdRebootDetected)
+            _state.KdBreakReason = lastEvent;
+        _state.KdFatalExceptionPending = fatalExceptionPending;
+        if (fatalExceptionPending)
+            _alerts.Add(ErrorMessages.FatalExceptionPending(lastEvent));
+    }
+
     public void SetVmPaused()
     {
         _state.VmPower = VmPowerState.Paused;
