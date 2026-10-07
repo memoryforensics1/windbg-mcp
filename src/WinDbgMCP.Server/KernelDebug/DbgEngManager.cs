@@ -99,11 +99,28 @@ public sealed class DbgEngManager : IDisposable
             {
                 if (!EngineHasNoDebuggee)
                     throw new InvalidOperationException(
-                        "The engine thread is busy with the previous session; call kd_disconnect first, then kd_connect.");
+                        "The engine thread is busy with the previous session (the target did not answer a " +
+                        "break-in); wait a few seconds and call kd_connect again.");
                 MarkEngineWedged();
                 throw new InvalidOperationException(EngineWedgedMessage);
             }
             _engineWedged = false;
+        }
+        else
+        {
+            // No client, but the thread may still be parked in the wait of a session
+            // that was dropped (hard vm_stop / snapshot restore with a parked engine).
+            // Say so instead of attaching behind it and blaming the KDNET settings.
+            try
+            {
+                await _thread.ExecuteAsync(() => { }, TimeSpan.FromSeconds(3));
+            }
+            catch (OperationCanceledException)
+            {
+                throw new InvalidOperationException(
+                    "The engine thread is not responding: it is still parked in the wait of a previous session " +
+                    "whose target went away. Kernel-debug tools need an MCP server restart; guest/VM tools still work.");
+            }
         }
 
         return await _thread.ExecuteAsync(() =>
@@ -115,7 +132,8 @@ public sealed class DbgEngManager : IDisposable
             {
                 _logger.LogWarning("Stale DbgEng client found on connect; ending old session");
                 _thread.PumpEnabled = false;
-                try { _client.TryEndSession(DEBUG_END.ACTIVE_TERMINATE); } catch { }
+                // ACTIVE_DETACH is the mode verified live to resume a halted kernel.
+                try { _client.TryEndSession(DEBUG_END.ACTIVE_DETACH); } catch { }
                 _client = null;
             }
 
@@ -254,6 +272,7 @@ public sealed class DbgEngManager : IDisposable
         // the event pump dispatch it (kernel targets need INFINITE waits, and the
         // pump's wait is where the GO is dispatched).
         bool needsResume;
+        var passedBackUnhandled = false;
         try
         {
             WakeEngineThread();
@@ -274,6 +293,7 @@ public sealed class DbgEngManager : IDisposable
                         // after "Target has been resumed".
                         var unhandled = _eventCallbacks.SecondChancePending;
                         _eventCallbacks.ClearSecondChancePending();
+                        passedBackUnhandled = unhandled;
                         _client.Control.TrySetExecutionStatus(unhandled ? DEBUG_STATUS.GO_NOT_HANDLED : DEBUG_STATUS.GO);
                         _thread.PumpEnabled = true;
                         return true;
@@ -287,10 +307,12 @@ public sealed class DbgEngManager : IDisposable
         {
             if (!EngineHasNoDebuggee)
                 return new DetachResult(false,
-                    "kd_disconnect could not get hold of the engine thread in time; the target is still " +
-                    "attached. Try kd_disconnect again.");
+                    "kd_disconnect could not get hold of the engine thread in time (the target did not answer " +
+                    "a break-in: busy, e.g. writing a crash dump); it is still attached. Try kd_disconnect again.");
+            // Not detached: the session stays live (and tracked) so the model sees
+            // TARGET REBOOTED if the kernel comes back, and can detach then.
             MarkEngineWedged();
-            return new DetachResult(true, "The session was dropped. " + EngineWedgedMessage);
+            return new DetachResult(false, EngineWedgedMessage);
         }
 
         if (needsResume)
@@ -317,7 +339,11 @@ public sealed class DbgEngManager : IDisposable
 
                 _client = null;
                 _logger.LogInformation("Disconnected from kernel debugger.");
-                return new DetachResult(true, "Disconnected from kernel debugger. Target has been resumed.");
+                return new DetachResult(true, passedBackUnhandled
+                    ? "Disconnected from kernel debugger. The target was resumed with its unhandled exception " +
+                      "passed back to the kernel (gn): expect it to BSOD and reboot on its own now; " +
+                      "kd_connect once the OS is back up if you need the debugger."
+                    : "Disconnected from kernel debugger. Target has been resumed.");
             }, ThreadGrabTimeout + TimeSpan.FromSeconds(5));
         }
         catch (OperationCanceledException)
@@ -327,7 +353,7 @@ public sealed class DbgEngManager : IDisposable
                     "kd_disconnect could not get hold of the engine thread in time; the target is still " +
                     "attached. Call get_system_state, then try kd_disconnect again.");
             MarkEngineWedged();
-            return new DetachResult(true, "The session was dropped. " + EngineWedgedMessage);
+            return new DetachResult(false, EngineWedgedMessage);
         }
     }
 
@@ -762,6 +788,7 @@ public sealed class DbgEngManager : IDisposable
     private HRESULT WaitForEventInterruptible(int firstMs, int deadlineMs, bool breakInEarly)
     {
         var started = Environment.TickCount64;
+        var exitSent = false;
         using var timer = new Timer(_ =>
         {
             if (Environment.TickCount64 - started >= deadlineMs)
@@ -797,13 +824,13 @@ public sealed class DbgEngManager : IDisposable
     /// the flag is a suspicion that a later successful probe clears.
     /// </summary>
     public const string EngineWedgedMessage =
-        "The kernel debugger engine is parked waiting for a target that has not (re-)attached. " +
-        "If get_system_state shows the OS is up (VMware Tools running), the guest restarted gracefully " +
-        var exitSent = false;
-        "while the debugger was connected and the session cannot be recovered in-process: kernel-debug " +
-        "tools need an MCP server restart (guest/VM tools still work). If the target is still rebooting, " +
-        "wait for TARGET REBOOTED and call kd_connect again. To avoid this, call kd_disconnect before " +
-        "restarting the guest.";
+        "The kernel debugger engine is parked waiting for a target that has not (re-)attached, so the " +
+        "session could not be detached and is still tracked. If the target is rebooting (after a BSOD), " +
+        "wait: get_system_state shows TARGET REBOOTED at the initial breakpoint, then kd_continue " +
+        "(kd_disconnect works again once the target is back). If get_system_state shows the OS is already " +
+        "up (VMware Tools running), the guest restarted gracefully while the debugger was connected and " +
+        "the session cannot be recovered in-process: kernel-debug tools need an MCP server restart " +
+        "(guest/VM tools still work). To avoid this, call kd_disconnect before restarting the guest.";
 
     public bool EngineWedged => _engineWedged;
     private volatile bool _engineWedged;
