@@ -82,11 +82,10 @@ public sealed class DbgEngManager : IDisposable
         // must not expire first or the target is left halted behind a live client.
         var timeout = TimeSpan.FromSeconds(_config.Timeouts.KdConnectSeconds + _config.Timeouts.KdInitialBreakSeconds + 15);
 
-        if (_engineWedged)
-            throw new InvalidOperationException(EngineWedgedMessage);
-
         // A stale client's pump may be parked in a target-less wait: try to free the
-        // thread, and if it does not answer, report the engine as wedged.
+        // thread, and if it does not answer, report the engine as wedged. A wedge
+        // recorded earlier is only a suspicion (the target may have been mid-reboot),
+        // so every connect re-probes instead of failing on the flag.
         if (_client != null)
         {
             WakeEngineThread();
@@ -104,6 +103,7 @@ public sealed class DbgEngManager : IDisposable
                 MarkEngineWedged();
                 throw new InvalidOperationException(EngineWedgedMessage);
             }
+            _engineWedged = false;
         }
 
         return await _thread.ExecuteAsync(() =>
@@ -284,7 +284,7 @@ public sealed class DbgEngManager : IDisposable
                     "kd_disconnect could not get hold of the engine thread in time; the target is still " +
                     "attached. Try kd_disconnect again.");
             MarkEngineWedged();
-            return new DetachResult(true, "Disconnected. " + EngineWedgedMessage);
+            return new DetachResult(true, "The session was dropped. " + EngineWedgedMessage);
         }
 
         if (needsResume)
@@ -321,34 +321,12 @@ public sealed class DbgEngManager : IDisposable
                     "kd_disconnect could not get hold of the engine thread in time; the target is still " +
                     "attached. Call get_system_state, then try kd_disconnect again.");
             MarkEngineWedged();
-            return new DetachResult(true, "Disconnected. " + EngineWedgedMessage);
+            return new DetachResult(true, "The session was dropped. " + EngineWedgedMessage);
         }
     }
 
     private bool EngineHasNoDebuggee => _eventCallbacks.LastExecutionStatus == DEBUG_STATUS.NO_DEBUGGEE;
     private static readonly TimeSpan ThreadGrabTimeout = TimeSpan.FromMilliseconds(PumpYieldMs + 5000);
-
-    /// <summary>
-    /// Ends the session from the calling (non-engine) thread. DEBUG_END_REENTRANT
-    /// is the one EndSession mode documented as callable while WaitForEvent is
-    /// running on the engine thread; it makes that wait return so the thread is
-    /// usable again. The pump then stops without raising an Error event.
-    /// </summary>
-    private void ForceEndSession()
-    {
-        _forcedEnd = true;
-        try
-        {
-            var hr = _client?.TryEndSession(DEBUG_END.END_REENTRANT);
-            _logger.LogWarning("Forced reentrant EndSession -> {Hr}", hr);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "Forced reentrant EndSession threw");
-        }
-    }
-
-    private volatile bool _forcedEnd;
 
     // ═══════════════════════════════════════════════════════════════
     //  STATE QUERY
@@ -711,7 +689,12 @@ public sealed class DbgEngManager : IDisposable
 
     private void PumpEvents()
     {
-        if (_client == null) return;
+        if (_client == null)
+        {
+            // Nothing to pump; without this the thread loop would spin on this call.
+            _thread.PumpEnabled = false;
+            return;
+        }
 
         // Live kernel targets only support INFINITE waits. A periodic ACTIVE
         // break-in yields the thread every few seconds so queued tool calls run
@@ -745,12 +728,6 @@ public sealed class DbgEngManager : IDisposable
                 }
             }
             // If status is still GO, it was just our interrupt to yield — keep pumping
-        }
-        else if (_forcedEnd)
-        {
-            _logger.LogInformation("Event pump released by forced EndSession ({Hr})", hr);
-            _forcedEnd = false;
-            _thread.PumpEnabled = false;
         }
         else
         {
@@ -793,27 +770,33 @@ public sealed class DbgEngManager : IDisposable
     private static bool WaitAbandoned(HRESULT hr) => hr == HRESULT.S_FALSE || hr == WaitExited;
 
     /// <summary>
-    /// The engine thread is parked in a target-less INFINITE wait (the kernel
-    /// restarted gracefully and never re-attached). Nothing wakes that wait —
-    /// SetInterrupt(EXIT), EndSession(REENTRANT) and a replacement thread/client
-    /// were all tried live; dbgeng is process-global and the stuck session owns it.
-    /// Record the fact so every kernel tool fails fast with an honest message.
+    /// The engine thread is parked in a target-less INFINITE wait and did not answer
+    /// a probe. Nothing wakes that wait while there is no target — SetInterrupt(EXIT),
+    /// EndSession(REENTRANT) and a replacement thread/client were all tried live;
+    /// dbgeng is process-global and the stuck session owns it. Two cases look the
+    /// same from here: the target is still rebooting (it will come back and the
+    /// thread frees itself), or it restarted gracefully and will never re-attach
+    /// (only an MCP server restart helps). The message says how to tell them apart;
+    /// the flag is a suspicion that a later successful probe clears.
     /// </summary>
     public const string EngineWedgedMessage =
-        "The kernel debugger engine is stuck waiting for a target that never re-attached " +
-        "(the guest restarted gracefully while the debugger was connected). Kernel-debug tools " +
-        "are unavailable until the MCP server process is restarted; guest/VM tools still work. " +
-        "To avoid this, call kd_disconnect before restarting the guest.";
+        "The kernel debugger engine is parked waiting for a target that has not (re-)attached. " +
+        "If get_system_state shows the OS is up (VMware Tools running), the guest restarted gracefully " +
+        "while the debugger was connected and the session cannot be recovered in-process: kernel-debug " +
+        "tools need an MCP server restart (guest/VM tools still work). If the target is still rebooting, " +
+        "wait for TARGET REBOOTED and call kd_connect again. To avoid this, call kd_disconnect before " +
+        "restarting the guest.";
 
     public bool EngineWedged => _engineWedged;
     private volatile bool _engineWedged;
 
     private void MarkEngineWedged()
     {
-        _logger.LogError("Engine thread is wedged in a target-less wait; kernel tools disabled until restart");
+        _logger.LogError("Engine thread did not answer a probe while the engine has no debuggee; kernel tools unavailable until it does");
         _engineWedged = true;
-        ForceEndSession();
-        _client = null;
+        // The client stays: the thread is still inside its WaitForEvent and will use
+        // it if the target ever comes back. The pump must not restart on its own.
+        _thread.PumpEnabled = false;
         _eventCallbacks.EnqueueError(EngineWedgedMessage);
     }
 

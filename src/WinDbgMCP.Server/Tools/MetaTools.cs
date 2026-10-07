@@ -46,8 +46,8 @@ public static class MetaTools
                     else if (s.VmTools == VmToolsState.Running)
                     {
                         sb.AppendLine($"   The OS has booted (VMware Tools is up) but the kernel did NOT re-attach to this debugger");
-                        sb.AppendLine($"   session (this is what a graceful restart does). The engine cannot recover from this in-process:");
-                        sb.AppendLine($"   kernel-debug tools need an MCP server restart; guest/VM tools keep working.");
+                        sb.AppendLine($"   session (this is what a graceful restart does). Call kd_disconnect then kd_connect; if kd_connect");
+                        sb.AppendLine($"   reports the engine is parked, kernel-debug tools need an MCP server restart (guest/VM tools keep working).");
                         sb.AppendLine($"   Next time call kd_disconnect BEFORE restarting the guest (guest_run_command does this for 'shutdown /r').");
                     }
                     else
