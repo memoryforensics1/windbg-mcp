@@ -176,8 +176,11 @@ public sealed class GuestExecManager
 
     /// <summary>
     /// Copy a file from the guest VM to the host.
-    /// Tries vmrun copyFile first; if it fails (e.g. large file timeout),
-    /// retries via VMware shared folders.
+    /// Asks the guest for the file size first: large files (>=50MB) go through a
+    /// VMware shared folder straight away (vmrun copyFile runs at ~2 MB/s and its
+    /// timeout would kill the copy and leave a partial file); small files use vmrun
+    /// copyFile, with the shared folder as the fallback for any failure including a
+    /// timeout. A failed copy never leaves a partial file on the host.
     /// </summary>
     public async Task<string> CopyFileFromGuestAsync(
         string guestPath, string hostPath, CancellationToken ct = default)
@@ -187,20 +190,56 @@ public sealed class GuestExecManager
         if (!string.IsNullOrEmpty(hostDir) && !Directory.Exists(hostDir))
             Directory.CreateDirectory(hostDir);
 
-        var result = await _vmware.CopyFileFromGuestAsync(guestPath, hostPath, ct);
-        if (result.Success && File.Exists(hostPath))
+        var guestSize = await GetGuestFileSizeAsync(guestPath, ct);
+        if (guestSize == null)
+            return $"Guest file not found: {guestPath}";
+
+        if (guestSize >= LargeFileThreshold)
         {
-            var fileSize = new FileInfo(hostPath).Length;
-            return $"Copied guest:{guestPath} -> {hostPath} ({fileSize:N0} bytes)";
+            var shareFirst = await CopyFromGuestViaShareAsync(guestPath, hostPath, ct);
+            if (shareFirst != null)
+                return shareFirst;
+            _logger.LogWarning("Shared folder transfer failed, falling back to vmrun copyFile");
         }
 
-        _logger.LogWarning("vmrun copyFile failed ({Stderr}), trying shared folder", result.Stderr.Trim());
+        string failure;
+        try
+        {
+            var result = await _vmware.CopyFileFromGuestAsync(guestPath, hostPath, ct);
+            if (result.Success && File.Exists(hostPath) && new FileInfo(hostPath).Length == guestSize)
+                return $"Copied guest:{guestPath} -> {hostPath} ({guestSize:N0} bytes)";
+            failure = result.Success ? "incomplete copy" : result.Stderr.Trim();
+        }
+        catch (TimeoutException)
+        {
+            failure = "vmrun copyFile timed out";
+        }
+        DeletePartialFile(hostPath);
 
+        _logger.LogWarning("vmrun copyFile failed ({Reason}), trying shared folder", failure);
         var shareResult = await CopyFromGuestViaShareAsync(guestPath, hostPath, ct);
         if (shareResult != null)
             return shareResult;
 
-        return $"File transfer failed: {result.Stderr}";
+        return $"File transfer failed: {failure}";
+    }
+
+    /// <summary>Size of a guest file in bytes, or null if it does not exist.</summary>
+    private async Task<long?> GetGuestFileSizeAsync(string guestPath, CancellationToken ct)
+    {
+        // Runs inside a .bat (RunCommandAsync), hence %%I rather than %I.
+        var sizeResult = await RunCommandAsync(
+            $"for %%I in (\"{guestPath}\") do @echo %%~zI", timeoutSeconds: 30, ct: ct);
+        if (!sizeResult.Success || sizeResult.ExitCode != 0)
+            return null;
+        var line = sizeResult.Stdout.Trim().Split('\n').LastOrDefault()?.Trim();
+        return long.TryParse(line, out var size) ? size : null;
+    }
+
+    private void DeletePartialFile(string hostPath)
+    {
+        try { if (File.Exists(hostPath)) File.Delete(hostPath); }
+        catch (Exception ex) { _logger.LogDebug(ex, "Could not delete partial file {Path}", hostPath); }
     }
 
     /// <summary>
