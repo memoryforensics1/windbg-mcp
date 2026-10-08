@@ -47,6 +47,7 @@ public sealed class StateCoordinator
     public Func<string?>? GetEngineBusy { get; set; }
     public Func<int>? GetPendingEventCount { get; set; }
     public Func<int>? GetPendingInformationalEventCount { get; set; }
+    public Func<int>? GetModuleEventsLast10s { get; set; }
     public Func<Task<(bool IsBugcheck, string? BugcheckCode, string? LastEvent)>>? DetectBugcheckAsync { get; set; }
     /// <summary>True while the current halt is a second-chance exception (the next resume bugchecks).</summary>
     public Func<bool>? IsSecondChancePending { get; set; }
@@ -342,6 +343,7 @@ public sealed class StateCoordinator
         // 2. Event queue count
         _state.PendingEventCount = GetPendingEventCount?.Invoke() ?? 0;
         _state.PendingInformationalEventCount = GetPendingInformationalEventCount?.Invoke() ?? 0;
+        _state.KdModuleEventsLast10s = _state.KdConnected ? GetModuleEventsLast10s?.Invoke() ?? 0 : 0;
         _state.KdEngineBusyWith = _state.KdConnected ? GetEngineBusy?.Invoke() : null;
 
         // 2.5 BSOD detection — check once when transitioning INTO break state.

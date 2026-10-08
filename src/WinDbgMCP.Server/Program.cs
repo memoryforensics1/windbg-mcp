@@ -73,6 +73,7 @@ builder.Services.AddSingleton<StateCoordinator>(sp =>
     coordinator.GetDbgEngExecutionStatus = () => dbgEng.GetExecutionStatus();
     coordinator.GetPendingEventCount = () => dbgEng.PendingEventCount;
     coordinator.GetPendingInformationalEventCount = () => dbgEng.PendingInformationalEventCount;
+    coordinator.GetModuleEventsLast10s = () => dbgEng.ModuleEventsInLast10s;
     coordinator.DetectBugcheckAsync = () => dbgEng.DetectBugcheckAsync();
     coordinator.IsSecondChancePending = () => dbgEng.SecondChancePending;
     coordinator.IsRebootDetected = () => dbgEng.RebootDetected;

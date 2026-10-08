@@ -24,6 +24,11 @@ public sealed class SystemState
     public int PendingInformationalEventCount { get; set; }
     public int PendingImportantEventCount => Math.Max(0, PendingEventCount - PendingInformationalEventCount);
 
+    // Module load/unload events in the last 10 s. A burst (>= 5) means the kernel
+    // is booting or loading drivers in bulk, and break-ins are dropped meanwhile.
+    public int KdModuleEventsLast10s { get; set; }
+    public bool KdModuleFlood => KdModuleEventsLast10s >= 5;
+
     // BSOD detection
     public bool IsBugcheck { get; set; }
     public string? BugcheckCode { get; set; }

@@ -27,6 +27,32 @@ public sealed class DebugEventCallbacks : DebugBaseEventCallbacks
     private const uint StatusWow64Breakpoint = 0x4000001F;
     private const uint StatusWow64SingleStep = 0x4000001E;
     private const int RecentEventCapacity = 20;
+
+    // Timestamps of the last module load/unload events. A burst of them is what a
+    // booting kernel looks like from here, and a booting kernel drops break-ins.
+    private readonly ConcurrentQueue<long> _moduleEventTicks = new();
+    private const int ModuleEventWindowMs = 10_000;
+    public const int ModuleFloodThreshold = 5;
+
+    /// <summary>Module load/unload events seen in the last 10 seconds.</summary>
+    public int ModuleEventsInLast10s
+    {
+        get
+        {
+            var cutoff = Environment.TickCount64 - ModuleEventWindowMs;
+            return _moduleEventTicks.Count(t => t >= cutoff);
+        }
+    }
+
+    /// <summary>True while the kernel is loading modules in bulk (boot, or a big driver load).</summary>
+    public bool IsModuleFlood => ModuleEventsInLast10s >= ModuleFloodThreshold;
+
+    private void NoteModuleEvent()
+    {
+        _moduleEventTicks.Enqueue(Environment.TickCount64);
+        while (_moduleEventTicks.Count > 64)
+            _moduleEventTicks.TryDequeue(out _);
+    }
     private readonly ConcurrentQueue<DebugEvent> _recentEvents = new();
 
     public DebugEventCallbacks(ILogger? logger = null)
@@ -225,6 +251,7 @@ public sealed class DebugEventCallbacks : DebugBaseEventCallbacks
         long imageFileHandle, long baseOffset, int moduleSize,
         string moduleName, string imageName, int checkSum, int timeDateStamp)
     {
+        NoteModuleEvent();
         Enqueue(new DebugEvent
         {
             Type = DebugEventKind.ModuleLoaded,
@@ -236,6 +263,7 @@ public sealed class DebugEventCallbacks : DebugBaseEventCallbacks
 
     public override DEBUG_STATUS UnloadModule(string imageBaseName, long baseOffset)
     {
+        NoteModuleEvent();
         Enqueue(new DebugEvent
         {
             Type = DebugEventKind.ModuleUnloaded,

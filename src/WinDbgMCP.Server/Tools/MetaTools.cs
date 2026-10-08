@@ -36,6 +36,12 @@ public static class MetaTools
             {
                 sb.AppendLine($"KD Transport:      {s.KdTransportType}");
                 sb.AppendLine($"Execution Status:  {s.KdExecStatus}");
+                if (s.KdModuleFlood)
+                {
+                    sb.AppendLine($"Kernel Activity:   booting / loading drivers in bulk ({s.KdModuleEventsLast10s} module events in the last 10 s).");
+                    sb.AppendLine($"   Break-ins are dropped while this lasts, so kd_break may time out: wait 30-60 s and retry.");
+                    sb.AppendLine($"   These are informational events, not a stop; guest tools work once VMware Tools reports running.");
+                }
 
                 if (s.KdRebootDetected)
                 {

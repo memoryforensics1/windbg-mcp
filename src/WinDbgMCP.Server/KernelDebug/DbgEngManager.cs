@@ -48,6 +48,9 @@ public sealed class DbgEngManager : IDisposable
     public bool IsConnected => _client != null;
     public int PendingEventCount => _eventCallbacks.PendingCount;
     public int PendingInformationalEventCount => _eventCallbacks.PendingInformationalCount;
+    /// <summary>Module load/unload events in the last 10 s; a burst means the kernel is booting and drops break-ins.</summary>
+    public int ModuleEventsInLast10s => _eventCallbacks.ModuleEventsInLast10s;
+    public bool IsModuleFlood => _eventCallbacks.IsModuleFlood;
     public bool RebootDetected => _eventCallbacks.RebootDetected;
     /// <summary>A second-chance (unhandled) exception is the current event: the next resume bugchecks the OS.</summary>
     public bool SecondChancePending => _eventCallbacks.SecondChancePending;
@@ -429,7 +432,11 @@ public sealed class DbgEngManager : IDisposable
     /// </summary>
     public async Task<string> BreakAsync()
     {
-        var timeout = TimeSpan.FromSeconds(_config.Timeouts.KdBreakSeconds);
+        // A booting kernel drops break-ins for tens of seconds; give it the time
+        // instead of reporting a failure the model cannot act on.
+        var floodAtStart = _eventCallbacks.IsModuleFlood;
+        var limitSeconds = floodAtStart ? Math.Max(_config.Timeouts.KdBreakSeconds, 60) : _config.Timeouts.KdBreakSeconds;
+        var timeout = TimeSpan.FromSeconds(limitSeconds);
 
         return await _thread.ExecuteAsync(() =>
         {
@@ -456,7 +463,7 @@ public sealed class DbgEngManager : IDisposable
 
             // A break-in sent while the kernel is busy is silently dropped, so
             // re-send it on every wait slice until the target halts or we time out.
-            var waitHr = WaitForEventInterruptible(InterruptRetryMs, _config.Timeouts.KdBreakSeconds * 1000, breakInEarly: true);
+            var waitHr = WaitForEventInterruptible(InterruptRetryMs, limitSeconds * 1000, breakInEarly: true);
 
             if (waitHr == HRESULT.S_OK)
             {
@@ -476,7 +483,14 @@ public sealed class DbgEngManager : IDisposable
                 // Target never answered the break-in (busy, rebooting, or the kernel
                 // booted without re-attaching). Keep watching it rather than wedge.
                 _thread.PumpEnabled = true;
-                return "Break-in sent repeatedly but the target did not halt within the timeout. " +
+                var modules = _eventCallbacks.ModuleEventsInLast10s;
+                if (modules >= DebugEventCallbacks.ModuleFloodThreshold || floodAtStart)
+                    return $"Break-in sent every 2 s for {limitSeconds} s but the kernel did not halt: it is still booting " +
+                           $"or loading drivers in bulk ({modules} module events in the last 10 s) and drops break-ins until " +
+                           "that settles. This is normal after a reboot, not a fault. Wait 30-60 s and call kd_break again " +
+                           "(get_system_state shows 'Kernel Activity' until the burst is over); guest tools work as soon as " +
+                           "VMware Tools reports running.";
+                return $"Break-in sent every 2 s for {limitSeconds} s but the target did not halt. " +
                        "It may be rebooting, booting without the debugger attached, or non-interruptible. " +
                        "Check get_system_state; if it says the kernel did not re-attach, kd_disconnect then kd_connect.";
             }
@@ -632,6 +646,11 @@ public sealed class DbgEngManager : IDisposable
                       "is rebooting or booted without re-attaching. Check get_system_state (it says which); " +
                       "if the OS is up, kd_disconnect then kd_connect."
                     : $"No debug event received within {timeoutSeconds}s. Target is still running. " +
+                      (_eventCallbacks.IsModuleFlood
+                          ? $"(The kernel is booting or loading drivers: {_eventCallbacks.ModuleEventsInLast10s} module events " +
+                            "in the last 10 s, all informational - no breakpoint, exception or bugcheck happened. " +
+                            "kd_break is likely to be dropped until this settles.) "
+                          : "") +
                       "You can: (1) Call kd_wait_for_event again to keep waiting, " +
                       "(2) Call kd_break to manually halt the target, or " +
                       "(3) Proceed with guest operations while the target runs.";
