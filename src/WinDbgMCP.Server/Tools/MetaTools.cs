@@ -71,9 +71,11 @@ public static class MetaTools
                 {
                     sb.AppendLine($"Break Reason:      {s.KdBreakReason ?? "unknown"}");
 
+                    sb.AppendLine($"Is Bugcheck:       {s.IsBugcheck}");
+                    sb.AppendLine($"Fatal Exception:   {s.KdFatalExceptionPending} (second-chance exception pending; next kd_continue bugchecks)");
                     if (s.IsBugcheck)
                     {
-                        sb.AppendLine($"BSOD DETECTED:     {s.BugcheckCode}");
+                        sb.AppendLine($"BSOD DETECTED:     {s.BugcheckCode}" + (s.BugcheckArgs != null ? $"  arguments: {s.BugcheckArgs}" : ""));
                         sb.AppendLine($"   The OS has CRASHED. Guest ops will NOT work.");
                         sb.AppendLine($"   {ErrorMessages.BsodRecoveryOptions}");
                     }

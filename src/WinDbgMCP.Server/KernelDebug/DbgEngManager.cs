@@ -674,14 +674,14 @@ public sealed class DbgEngManager : IDisposable
     /// Check if the current break is due to a BSOD/bugcheck.
     /// Must be called while target is broken in.
     /// </summary>
-    public async Task<(bool IsBugcheck, string? BugcheckCode, string? LastEvent)> DetectBugcheckAsync()
+    public async Task<(bool IsBugcheck, string? BugcheckCode, string? BugcheckArgs, string? LastEvent)> DetectBugcheckAsync()
     {
         var timeout = TimeSpan.FromSeconds(5);
 
         return await _thread.ExecuteAsync(() =>
         {
             if (_client == null)
-                return (false, (string?)null, (string?)null);
+                return (false, (string?)null, (string?)null, (string?)null);
 
             // .lastevent is the human-readable reason for this break (breakpoint,
             // access violation, break instruction...). It goes into get_system_state
@@ -703,13 +703,13 @@ public sealed class DbgEngManager : IDisposable
 
             var parsed = ParseBugcheckOutput(bugcheckOutput);
             if (parsed != null)
-                return (parsed.Value.IsBugcheck, parsed.Value.BugcheckCode, lastEvent);
+                return (parsed.Value.IsBugcheck, parsed.Value.BugcheckCode, parsed.Value.Arguments, lastEvent);
 
             _logger.LogDebug(".bugcheck output not recognised, falling back to .lastevent: {Output}",
                 bugcheckOutput.Trim());
 
             var fallback = ParseLastEventFallback(lastEventOutput);
-            return (fallback.IsBugcheck, fallback.BugcheckCode, lastEvent);
+            return (fallback.IsBugcheck, fallback.BugcheckCode, null, lastEvent);
         }, timeout);
     }
 
@@ -726,7 +726,7 @@ public sealed class DbgEngManager : IDisposable
     /// Parses ".bugcheck" output ("Bugcheck code 000000D1"). Returns null if the
     /// output does not carry a bugcheck code line at all.
     /// </summary>
-    public static (bool IsBugcheck, string? BugcheckCode)? ParseBugcheckOutput(string output)
+    public static (bool IsBugcheck, string? BugcheckCode, string? Arguments)? ParseBugcheckOutput(string output)
     {
         var match = Regex.Match(output, @"Bugcheck code\s+(?:0x)?([0-9A-Fa-f]{1,16})\b",
             RegexOptions.IgnoreCase);
@@ -734,7 +734,15 @@ public sealed class DbgEngManager : IDisposable
             return null;
 
         var code = Convert.ToUInt64(match.Groups[1].Value, 16);
-        return code != 0 ? (true, $"0x{code:X8}") : (false, null);
+        if (code == 0)
+            return (false, null, null);
+
+        // "Arguments ffffffff`c0000005 00000000`00000000 00000000`00000008 00000000`00000000"
+        var args = Regex.Match(output, @"Arguments\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)", RegexOptions.IgnoreCase);
+        var arguments = args.Success
+            ? $"{args.Groups[1].Value} {args.Groups[2].Value} {args.Groups[3].Value} {args.Groups[4].Value}"
+            : null;
+        return (true, $"0x{code:X8}", arguments);
     }
 
     public static (bool IsBugcheck, string? BugcheckCode) ParseLastEventFallback(string output)

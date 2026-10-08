@@ -32,6 +32,8 @@ public sealed class SystemState
     // BSOD detection
     public bool IsBugcheck { get; set; }
     public string? BugcheckCode { get; set; }
+    // The four bugcheck parameters from .bugcheck, e.g. "ffffffff`c0000005 00000000`00000000 ..." (null if unknown)
+    public string? BugcheckArgs { get; set; }
 
     // Halted at a second-chance (unhandled) exception: the kernel has not entered
     // KeBugCheckEx yet (so IsBugcheck is false) but the next resume bugchecks the OS.

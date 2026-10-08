@@ -108,12 +108,13 @@ public static class KernelDebugTools
                 // refresh retries the probe on the next tool call anyway.
                 try
                 {
-                    var (isBugcheck, bugcheckCode, lastEvent) = await dbgEng.DetectBugcheckAsync();
+                    var (isBugcheck, bugcheckCode, bugcheckArgs, lastEvent) = await dbgEng.DetectBugcheckAsync();
                     state.SetBsodProbed(lastEvent, dbgEng.SecondChancePending && !isBugcheck);
                     if (isBugcheck)
                     {
-                        state.SetBsodDetected(bugcheckCode);
-                        return result + $"\n\nWARNING: BSOD DETECTED (bugcheck {bugcheckCode}). " +
+                        state.SetBsodDetected(bugcheckCode, bugcheckArgs);
+                        return result + $"\n\nWARNING: BSOD DETECTED (bugcheck {bugcheckCode}" +
+                               (bugcheckArgs != null ? $", arguments {bugcheckArgs}" : "") + "). " +
                                "The OS has crashed; guest operations will NOT work. " +
                                ErrorMessages.BsodRecoveryOptions;
                     }
@@ -262,12 +263,13 @@ public static class KernelDebugTools
                 // Check for BSOD if we received an event
                 if (result.Contains("halted", StringComparison.OrdinalIgnoreCase))
                 {
-                    var (isBugcheck, bugcheckCode, lastEvent) = await dbgEng.DetectBugcheckAsync();
+                    var (isBugcheck, bugcheckCode, bugcheckArgs, lastEvent) = await dbgEng.DetectBugcheckAsync();
                     state.SetBsodProbed(lastEvent, dbgEng.SecondChancePending && !isBugcheck);
                     if (isBugcheck)
                     {
-                        state.SetBsodDetected(bugcheckCode);
-                        return result + $"\n\nWARNING: BSOD DETECTED (bugcheck {bugcheckCode}). " +
+                        state.SetBsodDetected(bugcheckCode, bugcheckArgs);
+                        return result + $"\n\nWARNING: BSOD DETECTED (bugcheck {bugcheckCode}" +
+                               (bugcheckArgs != null ? $", arguments {bugcheckArgs}" : "") + "). " +
                                "The OS has crashed; guest operations will NOT work. " +
                                ErrorMessages.BsodRecoveryOptions;
                     }

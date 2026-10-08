@@ -76,5 +76,24 @@ public class BugcheckParsingTests
     [Fact]
     public void FirstLastEventLine_Empty_IsNull()
         => Assert.Null(DbgEngManager.FirstLastEventLine("   \n  \n"));
-}
 
+    [Fact]
+    public void BugcheckOutput_CarriesArguments()
+    {
+        var result = DbgEngManager.ParseBugcheckOutput(
+            "Bugcheck code 0000001E\nArguments ffffffff`c0000005 00000000`00000000 00000000`00000008 00000000`00000000\n");
+        Assert.NotNull(result);
+        Assert.True(result!.Value.IsBugcheck);
+        Assert.Equal("0x0000001E", result.Value.BugcheckCode);
+        Assert.Equal("ffffffff`c0000005 00000000`00000000 00000000`00000008 00000000`00000000", result.Value.Arguments);
+    }
+
+    [Fact]
+    public void BugcheckOutput_WithoutArgumentsLine_HasNullArguments()
+    {
+        var result = DbgEngManager.ParseBugcheckOutput("Bugcheck code 000000D1\n");
+        Assert.NotNull(result);
+        Assert.True(result!.Value.IsBugcheck);
+        Assert.Null(result.Value.Arguments);
+    }
+}

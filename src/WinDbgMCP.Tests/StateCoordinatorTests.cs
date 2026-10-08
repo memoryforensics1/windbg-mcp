@@ -53,7 +53,7 @@ public class StateCoordinatorTests : IDisposable
         _coordinator.DetectBugcheckAsync = async () =>
         {
             var (isBugcheck, code) = await (_detectBugcheck?.Invoke() ?? Task.FromResult((false, (string?)null)));
-            return (isBugcheck, code, (string?)null);
+            return (isBugcheck, code, (string?)null, (string?)null);
         };
         _coordinator.DrainDebugEvents = () =>
         {
