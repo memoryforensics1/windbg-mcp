@@ -279,10 +279,16 @@ public static class KernelDebugTools
             }
             catch (OperationCanceledException)
             {
-                // Don't assert "still running": during a reboot the engine has no
-                // debuggee and the wait couldn't be woken before the outer timeout.
+                // Don't assert "still running": the engine could not be reached before
+                // the outer timeout, which has two very different causes.
+                if (state.State.KdModuleFlood)
+                    return $"Wait returned after {timeoutSeconds}s without reaching the engine: the kernel is booting " +
+                           $"or loading drivers in bulk ({state.State.KdModuleEventsLast10s} module events in the last 10 s) " +
+                           "and drops the break-in the engine needs to hand the thread over. Nothing is wrong and no " +
+                           "stop event happened. Wait 30-60 s and call again; get_system_state shows 'Kernel Activity' " +
+                           "until the burst is over, and guest tools work once VMware Tools reports running.";
                 return $"Wait returned after {timeoutSeconds}s without reaching the engine wait. " +
-                       "The target is busy or rebooting; kernel tools queue behind it until it is back. " +
+                       "The target is rebooting (no debuggee yet) or busy; kernel tools queue behind it until it is back. " +
                        "Poll get_system_state (it shows TARGET REBOOTED when the kernel re-attaches).";
             }
             catch (Exception ex)

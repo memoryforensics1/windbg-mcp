@@ -40,10 +40,15 @@ public static class MetaTools
                     ? "Reboot Generation: 0 (the kernel has not rebooted since kd_connect)"
                     : $"Reboot Generation: {s.KdRebootGeneration} (the kernel rebooted {s.KdRebootGeneration} time(s) since kd_connect; " +
                       $"events tagged reboot#{s.KdRebootGeneration} belong to the current kernel, lower or untagged ones to an earlier one)");
-                if (s.KdModuleFlood)
+                if (s.KdModuleFlood && s.KdExecStatus == DebugExecutionStatus.Break)
+                {
+                    sb.AppendLine($"Kernel Activity:   {s.KdModuleEventsLast10s} module events in the last 10 s (the debugger enumerated the loaded modules " +
+                                  "at this halt; informational, not a stop reason).");
+                }
+                else if (s.KdModuleFlood)
                 {
                     sb.AppendLine($"Kernel Activity:   booting / loading drivers in bulk ({s.KdModuleEventsLast10s} module events in the last 10 s).");
-                    sb.AppendLine($"   Break-ins are dropped while this lasts, so kd_break may time out: wait 30-60 s and retry.");
+                    sb.AppendLine($"   Break-ins are dropped while this lasts, so kd_break and kd_wait_for_event may time out: wait 30-60 s and retry.");
                     sb.AppendLine($"   These are informational events, not a stop; guest tools work once VMware Tools reports running.");
                 }
 
@@ -72,7 +77,9 @@ public static class MetaTools
                     sb.AppendLine($"Break Reason:      {s.KdBreakReason ?? "unknown"}");
 
                     sb.AppendLine($"Is Bugcheck:       {s.IsBugcheck}");
-                    sb.AppendLine($"Fatal Exception:   {s.KdFatalExceptionPending} (second-chance exception pending; next kd_continue bugchecks)");
+                    sb.AppendLine(s.KdFatalExceptionPending
+                        ? "Fatal Exception:   True (second-chance exception pending; the next kd_continue bugchecks the OS)"
+                        : "Fatal Exception:   False");
                     if (s.IsBugcheck)
                     {
                         sb.AppendLine($"BSOD DETECTED:     {s.BugcheckCode}" + (s.BugcheckArgs != null ? $"  arguments: {s.BugcheckArgs}" : ""));
