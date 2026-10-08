@@ -99,9 +99,10 @@ public static class MetaTools
                 if (s.KdEngineBusyWith != null)
                 {
                     sb.AppendLine($"ENGINE BUSY:       {s.KdEngineBusyWith}");
-                    sb.AppendLine($"   A command that outlived its tool timeout is still running on the single debugger thread.");
-                    sb.AppendLine($"   Every kernel tool waits behind it (and times out) until it finishes; symbol loading can take");
-                    sb.AppendLine($"   minutes the first time. Wait and poll get_system_state; do not re-issue the command.");
+                    sb.AppendLine($"   An operation that outlived its tool timeout still occupies the single debugger thread;");
+                    sb.AppendLine($"   every kernel tool waits behind it (and times out) until it finishes.");
+                    sb.AppendLine($"   {WinDbgMCP.Server.KernelDebug.EngineBusyException.Explain(s.KdEngineBusyWith)}");
+                    sb.AppendLine($"   Wait and poll get_system_state; do not re-issue the same command.");
                 }
             }
 

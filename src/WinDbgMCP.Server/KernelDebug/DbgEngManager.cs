@@ -101,7 +101,7 @@ public sealed class DbgEngManager : IDisposable
             {
                 // Stop the pump from re-entering its wait between this probe and
                 // the connect work item below.
-                await _thread.ExecuteAsync(() => { _thread.PumpEnabled = false; }, ThreadGrabTimeout);
+                await _thread.ExecuteAsync(() => { _thread.PumpEnabled = false; }, ThreadGrabTimeout, "kd_connect (probe of the previous session)");
             }
             catch (OperationCanceledException)
             {
@@ -121,7 +121,7 @@ public sealed class DbgEngManager : IDisposable
             // Say so instead of attaching behind it and blaming the KDNET settings.
             try
             {
-                await _thread.ExecuteAsync(() => { }, TimeSpan.FromSeconds(3));
+                await _thread.ExecuteAsync(() => { }, TimeSpan.FromSeconds(3), "kd_connect (engine probe)");
             }
             catch (OperationCanceledException)
             {
@@ -263,7 +263,7 @@ public sealed class DbgEngManager : IDisposable
                 throw new InvalidOperationException(
                     $"WaitForEvent failed: {waitHr}. " + ErrorMessages.KdConnectFailed);
             }
-        }, timeout);
+        }, timeout, "kd_connect (attach and initial breakpoint)");
     }
 
     /// <summary>
@@ -310,7 +310,7 @@ public sealed class DbgEngManager : IDisposable
                 }
                 catch { }
                 return false;
-            }, ThreadGrabTimeout);
+            }, ThreadGrabTimeout, "kd_disconnect (resuming the target)");
         }
         catch (OperationCanceledException)
         {
@@ -353,7 +353,7 @@ public sealed class DbgEngManager : IDisposable
                       "passed back to the kernel (gn): expect it to BSOD and reboot on its own now; " +
                       "kd_connect once the OS is back up if you need the debugger."
                     : "Disconnected from kernel debugger. Target has been resumed.");
-            }, ThreadGrabTimeout + TimeSpan.FromSeconds(5));
+            }, ThreadGrabTimeout + TimeSpan.FromSeconds(5), "kd_disconnect (detaching)");
         }
         catch (OperationCanceledException)
         {
@@ -497,7 +497,7 @@ public sealed class DbgEngManager : IDisposable
                        "It may be rebooting, booting without the debugger attached, or non-interruptible. " +
                        "Check get_system_state; if it says the kernel did not re-attach, kd_disconnect then kd_connect.";
             }
-        }, timeout + TimeSpan.FromSeconds(2));
+        }, timeout + TimeSpan.FromSeconds(2), "kd_break (waiting for the target to answer the break-in)");
     }
 
     /// <summary>
@@ -530,7 +530,7 @@ public sealed class DbgEngManager : IDisposable
             return "Target resumed. Guest operations are now available. " +
                    "If you set breakpoints, call kd_wait_for_event to check for hits, " +
                    "or call kd_break to halt the target manually.";
-        }, timeout);
+        }, timeout, "kd_continue");
     }
 
     /// <summary>
@@ -581,7 +581,7 @@ public sealed class DbgEngManager : IDisposable
                 return $"Step {mode} timed out; the target is still running. The instruction may have " +
                        "caused a long-running operation. Call kd_break to interrupt, or kd_wait_for_event to continue waiting.";
             }
-        }, timeout + TimeSpan.FromSeconds(10));
+        }, timeout + TimeSpan.FromSeconds(10), "kd_step (waiting for the step to complete)");
     }
 
     /// <summary>
@@ -663,7 +663,7 @@ public sealed class DbgEngManager : IDisposable
             _eventCallbacks.EnqueueError($"kd_wait_for_event: WaitForEvent returned {waitHr}");
             return $"WaitForEvent failed with {waitHr}. Target state is unknown — " +
                    "call get_system_state, then kd_break or kd_continue as appropriate.";
-        }, timeout + TimeSpan.FromSeconds(5)); // Outer timeout slightly larger
+        }, timeout + TimeSpan.FromSeconds(5), "kd_wait_for_event (waiting for a debug event)"); // Outer timeout slightly larger
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -710,7 +710,7 @@ public sealed class DbgEngManager : IDisposable
 
             var fallback = ParseLastEventFallback(lastEventOutput);
             return (fallback.IsBugcheck, fallback.BugcheckCode, null, lastEvent);
-        }, timeout);
+        }, timeout, "break probe (.bugcheck / .lastevent)");
     }
 
     /// <summary>"Last event: Access violation - code c0000005 (!!! second chance !!!)" -> the part after the colon.</summary>
