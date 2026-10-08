@@ -472,7 +472,7 @@ public sealed class StateCoordinator
                         : VmToolsState.NotResponding;
                     if (previousTools == VmToolsState.Running && _state.VmTools == VmToolsState.NotResponding)
                         _alerts.Add("VMWARE TOOLS STOPPED RESPONDING: the guest may be rebooting, hung, or crashed. " +
-                                    "Guest operations will fail until it recovers; check get_system_state / vm_screenshot.");
+                                    "Guest operations will fail until it recovers; check get_system_state (and vm_screenshot where available).");
                 }
                 catch (Exception ex)
                 {

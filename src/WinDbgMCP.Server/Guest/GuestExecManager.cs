@@ -214,9 +214,12 @@ public sealed class GuestExecManager
         if (!string.IsNullOrEmpty(hostDir) && !Directory.Exists(hostDir))
             Directory.CreateDirectory(hostDir);
 
-        var guestSize = await GetGuestFileSizeAsync(guestPath, ct);
+        var (guestSize, probeError) = await GetGuestFileSizeAsync(guestPath, ct);
         if (guestSize == null)
-            return $"Guest file not found: {guestPath}";
+            return probeError == null
+                ? $"Guest file not found: {guestPath}"
+                : $"Could not check the guest file {guestPath} before copying: {probeError}. " +
+                  "The guest may be halted, rebooting, or VMware Tools not responding; check get_system_state and retry.";
 
         string? shareError = null;
         if (guestSize >= LargeFileThreshold)
@@ -255,16 +258,30 @@ public sealed class GuestExecManager
         return TransferFailure(failure, shareError);
     }
 
-    /// <summary>Size of a guest file in bytes, or null if it does not exist.</summary>
-    private async Task<long?> GetGuestFileSizeAsync(string guestPath, CancellationToken ct)
+    /// <summary>
+    /// Size of a guest file in bytes. Size null with Error null means the file does
+    /// not exist; Error set means the probe itself could not run (guest unreachable).
+    /// </summary>
+    private async Task<(long? Size, string? Error)> GetGuestFileSizeAsync(string guestPath, CancellationToken ct)
     {
         // Runs inside a .bat (RunCommandAsync), hence %%I rather than %I.
-        var sizeResult = await RunCommandAsync(
-            $"for %%I in (\"{guestPath}\") do @echo %%~zI", timeoutSeconds: 30, ct: ct);
-        if (!sizeResult.Success || sizeResult.ExitCode != 0)
-            return null;
+        GuestCommandResult sizeResult;
+        try
+        {
+            sizeResult = await RunCommandAsync(
+                $"for %%I in (\"{guestPath}\") do @echo %%~zI", timeoutSeconds: 30, ct: ct);
+        }
+        catch (Exception ex)
+        {
+            return (null, $"{ex.GetType().Name}: {ex.Message}");
+        }
+        if (!sizeResult.Success)
+            return (null, sizeResult.ErrorMessage ?? "guest command did not run");
         var line = sizeResult.Stdout.Trim().Split('\n').LastOrDefault()?.Trim();
-        return long.TryParse(line, out var size) ? size : null;
+        if (long.TryParse(line, out var size))
+            return (size, null);
+        // "for" prints nothing for a missing file; an exit code with no number is the same thing.
+        return (null, null);
     }
 
     private static string Reason(Vmware.ProcessResult r) =>

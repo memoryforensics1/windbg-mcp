@@ -82,7 +82,7 @@ public static class ErrorMessages
     public const string ToolsNotResponding =
         "VMware Tools is not responding inside the guest. Possible causes: " +
         "(1) VM is still booting — wait 10-30 seconds and retry. " +
-        "(2) Guest OS crashed — check vm_screenshot. " +
+        "(2) Guest OS crashed, or halted by the kernel debugger — check get_system_state (and vm_screenshot where available). " +
         "(3) VMware Tools not installed — cannot execute guest operations without it. " +
         "Call get_system_state for current status.";
 

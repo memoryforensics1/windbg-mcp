@@ -359,7 +359,8 @@ public sealed class DbgEngManager : IDisposable
         {
             if (!EngineHasNoDebuggee)
                 return new DetachResult(false,
-                    "kd_disconnect could not get hold of the engine thread in time; the target is still " +
+                    (needsResume ? "The target WAS resumed and is running, but the detach itself did not complete: " : "") +
+                    "kd_disconnect could not get hold of the engine thread in time; the debugger is still " +
                     "attached. Call get_system_state, then try kd_disconnect again.");
             MarkEngineWedged();
             return new DetachResult(false, EngineWedgedMessage);
@@ -527,9 +528,9 @@ public sealed class DbgEngManager : IDisposable
                 return "Target resumed with the unhandled exception passed back to the kernel (gn). " +
                        "Expect a BSOD next: call kd_wait_for_event to catch the bugcheck break-in.";
 
-            return "Target resumed. Guest operations are now available. " +
-                   "If you set breakpoints, call kd_wait_for_event to check for hits, " +
-                   "or call kd_break to halt the target manually.";
+            // The tool adds what follows (boot, crash path, or normal running) from
+            // the state it captured before the call.
+            return "Target resumed.";
         }, timeout, "kd_continue");
     }
 

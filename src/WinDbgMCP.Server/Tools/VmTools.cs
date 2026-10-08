@@ -29,7 +29,9 @@ public static class VmTools
                     return $"vm_start failed: {result.Message}";
 
                 state.SetVmPowerChangedByTool(VmPowerState.Running);
-                return result.Message + " Call get_system_state to check when VMware Tools is running.";
+                return result.Message + " The guest now boots: poll get_system_state until VMware Tools reports Running " +
+                       "before guest tools, and allow 30-60 s before kd_connect (KDNET initialises during boot; an earlier " +
+                       "kd_connect simply times out, which is not a configuration error).";
             }
             catch (TimeoutException)
             {
@@ -218,16 +220,21 @@ public static class VmTools
                             ? KdTransport.KDNET
                             : KdTransport.Serial;
                         state.SetKdConnected(transport);
-                        return statusMsg + $" Kernel debugger reconnected automatically. {reconnectResult}";
+                        return statusMsg + $" Kernel debugger reconnected automatically. {reconnectResult} " +
+                               "Frida and dbgsrv sessions (if any) are gone. The target is halted at its initial " +
+                               "breakpoint: call kd_continue before any guest operation.";
                     }
                     catch (Exception ex)
                     {
                         return statusMsg + $" Auto-reconnect failed: {ex.Message} " +
-                               "Call kd_connect manually when the VM is ready.";
+                               "Frida and dbgsrv sessions (if any) are gone. Call kd_connect when the VM is ready " +
+                               "(allow 30-60 s after a restore for KDNET).";
                     }
                 }
 
-                return statusMsg + " " + ErrorMessages.SnapshotRestoredWarning;
+                return statusMsg + (wasKdConnected
+                    ? " " + ErrorMessages.SnapshotRestoredWarning
+                    : " Frida and dbgsrv sessions (if any) were terminated by the restore; the kernel debugger was not connected.");
             }
             catch (TimeoutException)
             {

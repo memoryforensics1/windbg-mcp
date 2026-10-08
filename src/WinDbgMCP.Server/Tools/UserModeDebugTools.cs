@@ -96,7 +96,9 @@ public static class UserModeDebugTools
             }
             catch (OperationCanceledException)
             {
-                return "umd_frida timed out.";
+                return "umd_frida timed out: the frida process in the guest did not answer. The guest may be halted by the " +
+                       "kernel debugger or rebooting (check get_system_state), or the script is blocking. Retry once the " +
+                       "guest is running.";
             }
             catch (Exception ex)
             {
@@ -523,8 +525,9 @@ public static class UserModeDebugTools
             }
             catch (OperationCanceledException)
             {
-                return $"umd_dbgsrv_execute '{action}' timed out. The DbgEng thread may be busy. " +
-                       "Try again, or disconnect and reconnect.";
+                return $"umd_dbgsrv_execute '{action}' timed out. dbgsrv runs inside the guest, so this usually means the " +
+                       "guest is not responding: halted by the kernel debugger (check get_system_state; kd_continue), " +
+                       "rebooting, or dbgsrv.exe died. Retry once the guest is running; disconnect and reconnect if it persists.";
             }
             catch (Exception ex)
             {
@@ -582,7 +585,9 @@ public static class UserModeDebugTools
             }
             catch (OperationCanceledException)
             {
-                return "umd_ttd timed out.";
+                return "umd_ttd timed out: the TTD recorder in the guest did not answer. The guest may be halted by the " +
+                       "kernel debugger or rebooting (check get_system_state), or the recording is still being written. " +
+                       "Retry once the guest is running.";
             }
             catch (Exception ex)
             {

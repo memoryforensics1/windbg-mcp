@@ -41,12 +41,14 @@ public static class KernelDebugTools
             }
             catch (OperationCanceledException)
             {
-                return "kd_connect timed out. The kernel debug target did not respond within " +
-                       $"{config.Timeouts.KdConnectSeconds}s. Verify: " +
-                       "(1) VM is running with debug boot enabled (bcdedit /debug on + KDNET configured). " +
-                       "(2) The KDNET port/key matches appsettings.json. " +
-                       "(3) No other debugger is already attached. " +
-                       "(4) Host firewall allows UDP port inbound.";
+                var budget = config.Timeouts.KdConnectSeconds + config.Timeouts.KdInitialBreakSeconds + 15;
+                return "kd_connect timed out: the kernel debug target did not answer within " +
+                       $"{budget}s. If the VM was started or reset less than a minute ago, KDNET is still initialising: " +
+                       "wait 30-60 s and retry (nothing is wrong). Otherwise verify: " +
+                       "(1) the VM is running with debug boot enabled (bcdedit /debug on + KDNET configured); " +
+                       "(2) the KDNET port/key matches appsettings.json; " +
+                       "(3) no other debugger is attached; " +
+                       "(4) the host firewall allows the UDP port inbound.";
             }
             catch (Exception ex)
             {
@@ -57,7 +59,8 @@ public static class KernelDebugTools
 
     [McpServerTool(Name = "kd_disconnect"), Description(
         "Disconnect from the kernel debug target. " +
-        "Resumes the target before disconnecting so the VM keeps running.")]
+        "Resumes the target before disconnecting so the VM keeps running (at a BSOD or a fatal exception " +
+        "that means the kernel proceeds to its crash dump and reboot).")]
     public static Task<string> KdDisconnect(
         StateCoordinator state,
         DbgEngManager dbgEng,
@@ -65,13 +68,18 @@ public static class KernelDebugTools
     {
         return state.RunToolAsync("kd_disconnect", async () =>
         {
+            var crashed = state.State.IsBugcheck || state.State.KdFatalExceptionPending;
+            var crashNote = crashed
+                ? " The target was halted at a crash, so resuming it means the kernel now writes its dump and reboots " +
+                  "on its own; guest tools work once VMware Tools is back, and kd_connect only after that."
+                : "";
             try
             {
                 var result = await dbgEng.DisconnectAsync();
                 if (result.Detached)
                     state.SetKdDisconnected();
                 return result.Detached
-                    ? result.Message
+                    ? result.Message + crashNote
                     : "NOT DETACHED: " + result.Message + " The debugger is still connected.";
             }
             catch (Exception ex)
@@ -128,7 +136,17 @@ public static class KernelDebugTools
             }
             catch (OperationCanceledException)
             {
-                return "kd_break timed out. The target may not be in a state where it can break.";
+                // The break-in logic itself explains boot floods; this is the outer
+                // timeout: the engine thread could not even be reached.
+                var busy = dbgEng.BusyDescription;
+                if (busy != null)
+                    return $"kd_break could not reach the engine: {busy} still occupies the debugger thread. " +
+                           EngineBusyException.Explain(busy) + " Wait and retry.";
+                if (state.State.KdModuleFlood)
+                    return "kd_break could not reach the engine: the kernel is booting or loading drivers in bulk and " +
+                           "drops break-ins until that settles (normal after a reboot). Wait 30-60 s and retry.";
+                return "kd_break could not reach the engine within its timeout. The target may be rebooting, paused, " +
+                       "or busy; call get_system_state, then retry.";
             }
             catch (Exception ex)
             {
@@ -140,7 +158,8 @@ public static class KernelDebugTools
     [McpServerTool(Name = "kd_continue"), Description(
         "Resume target execution (go). Returns immediately — the target starts running. " +
         "Use kd_wait_for_event to check for breakpoint hits, or kd_break to halt again. " +
-        "Guest operations (vm_execute, vm_send_file) require the target to be running.")]
+        "Guest operations (guest_run_command, guest_transfer_*) require the target to be running. " +
+        "At a BSOD or a fatal exception this does not resume the OS: the kernel proceeds to its crash dump and reboot.")]
     public static Task<string> KdContinue(
         StateCoordinator state,
         DbgEngManager dbgEng,
@@ -150,17 +169,31 @@ public static class KernelDebugTools
         {
             var wasBugcheck = state.State.IsBugcheck;
             var bugcheckCode = state.State.BugcheckCode;
+            var wasInitialBreakAfterReboot = state.State.KdRebootDetected;
 
             try
             {
                 var result = await dbgEng.ContinueAsync();
-                return wasBugcheck
-                    ? result + "\n\n" + ErrorMessages.BsodContinueWarning(bugcheckCode)
-                    : result;
+                if (wasBugcheck)
+                    return result + " The kernel is now in its crash path, NOT running the OS: guest tools stay unavailable " +
+                           "until it has rebooted.\n\n" + ErrorMessages.BsodContinueWarning(bugcheckCode);
+                if (result.Contains("(gn)", StringComparison.Ordinal))
+                    return result;
+                if (wasInitialBreakAfterReboot)
+                    return result + " The OS boots now from the initial breakpoint. Expect a burst of informational module " +
+                           "events (not stops); the kernel drops break-ins meanwhile, so kd_break may need up to 60 s; " +
+                           "guest tools work once get_system_state shows VMware Tools: Running (typically 30-90 s).";
+                return result + " Guest operations are now available. If you set breakpoints, call kd_wait_for_event " +
+                       "to check for hits, or call kd_break to halt the target manually.";
             }
             catch (OperationCanceledException)
             {
-                return "kd_continue timed out.";
+                var busy = dbgEng.BusyDescription;
+                return busy != null
+                    ? $"kd_continue could not reach the engine: {busy} still occupies the debugger thread. " +
+                      EngineBusyException.Explain(busy) + " The target is still halted. Wait and retry."
+                    : "kd_continue could not reach the engine within its timeout; the target is still halted. " +
+                      "Call get_system_state and retry.";
             }
             catch (Exception ex)
             {
@@ -186,7 +219,12 @@ public static class KernelDebugTools
             }
             catch (OperationCanceledException)
             {
-                return "kd_step timed out. The target may be in an unexpected state.";
+                var busy = dbgEng.BusyDescription;
+                return busy != null
+                    ? $"kd_step could not reach the engine: {busy} still occupies the debugger thread. " +
+                      EngineBusyException.Explain(busy) + " Wait and retry."
+                    : "kd_step did not complete within its timeout: the stepped instruction may have started a long " +
+                      "operation and the target is running. Call get_system_state; kd_break halts it again.";
             }
             catch (Exception ex)
             {
@@ -243,7 +281,7 @@ public static class KernelDebugTools
 
     [McpServerTool(Name = "kd_wait_for_event"), Description(
         "Wait for a debug event (breakpoint hit, exception, etc.) with a timeout. " +
-        "Use this after kd_continue + set_breakpoint to wait for the breakpoint to be hit. " +
+        "Use this after kd_execute('bp ...') + kd_continue to wait for the breakpoint to be hit. " +
         "ALWAYS returns within timeout — never hangs. If no event, target keeps running.")]
     public static Task<string> KdWaitForEvent(
         StateCoordinator state,
