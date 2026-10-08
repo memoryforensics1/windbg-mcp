@@ -23,6 +23,7 @@ public sealed class StateCoordinator
 
     // BSOD detection — only check once per break-in, not every refresh
     private bool _bsodCheckedForCurrentBreak;
+    private bool _noDebuggeeAlerted;
 
     // State transitions observed since the last tool result was produced.
     // Flushed into the banner RunToolAsync prepends to every tool result.
@@ -299,14 +300,29 @@ public sealed class StateCoordinator
             // mark the session lost — kd_connect would orphan the live client.
             if (status == DebugExecutionStatus.NoDebuggee && !rebooted)
             {
-                _logger.LogWarning("Kernel debugger connection lost (NoDebuggee detected)");
-                _alerts.Add("KERNEL DEBUGGER CONNECTION LOST: the engine reports no debuggee. " +
-                            "Call kd_connect to reattach.");
-                _state.KdConnected = false;
+                // The engine still owns its client, so the session is NOT gone from
+                // its point of view: keep tracking it (kernel gates explain "no
+                // debuggee"), and tell the caller once how to proceed. Marking it
+                // disconnected here sent callers in a circle (kd_connect: "already
+                // connected / engine parked"; kd_disconnect: "not connected").
+                if (!_noDebuggeeAlerted)
+                {
+                    _noDebuggeeAlerted = true;
+                    _logger.LogWarning("Kernel debugger has no debuggee (session ended or target gone)");
+                    _alerts.Add("KERNEL DEBUGGER LOST ITS TARGET: the engine reports no debuggee (the target went away " +
+                                "or the session ended). If TARGET REBOOTED does not follow within a minute, " +
+                                "kd_disconnect then kd_connect.");
+                }
                 _state.KdBreakReason = null;
                 _state.IsBugcheck = false;
                 _state.BugcheckCode = null;
+                _state.KdFatalExceptionPending = false;
             }
+            else if (status != DebugExecutionStatus.NoDebuggee)
+            {
+                _noDebuggeeAlerted = false;
+            }
+            _state.KdEngineParked = IsEngineParked?.Invoke() ?? false;
 
             // 1.5 Reboot detection — the old kernel (and any BSOD it was in) is gone,
             // so the new break must be re-evaluated from scratch.

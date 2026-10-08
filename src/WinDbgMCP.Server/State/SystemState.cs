@@ -43,6 +43,10 @@ public sealed class SystemState
     // (e.g. "!analyze -v, running for 95 s"); every other kernel tool waits behind it.
     public string? KdEngineBusyWith { get; set; }
 
+    // The engine thread is parked in a target-less wait that did not answer a probe
+    // (graceful restart while attached, or a reboot still in progress).
+    public bool KdEngineParked { get; set; }
+
     // Target rebooted since the last kd_continue; engine reconnected at the initial breakpoint
     public bool KdRebootDetected { get; set; }
     // Reboots since kd_connect; debug events are tagged "reboot#N" with the generation they belong to

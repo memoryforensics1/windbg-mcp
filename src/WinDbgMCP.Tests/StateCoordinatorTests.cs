@@ -628,12 +628,20 @@ public class StateCoordinatorTests : IDisposable
         SetVmRunning();
         SetKdConnectedBroken();
 
-        // Now simulate DbgEng reporting NoDebuggee (connection lost)
+        // Now simulate DbgEng reporting NoDebuggee (target gone / session ended)
         _execStatus = DebugExecutionStatus.NoDebuggee;
 
         await _coordinator.RefreshStateAsync();
 
-        Assert.False(_coordinator.State.KdConnected);
+        // The engine still owns its client, so the session stays tracked (marking it
+        // disconnected sent callers in a circle); kernel tools explain the state instead.
+        Assert.True(_coordinator.State.KdConnected);
+        Assert.Equal(DebugExecutionStatus.NoDebuggee, _coordinator.State.KdExecStatus);
+        var gate = await _coordinator.ValidatePreconditionsAsync("kd_execute");
+        Assert.NotNull(gate);
+        Assert.Contains("no debuggee", gate!.Message);
+        var result = await _coordinator.RunToolAsync("get_system_state", () => Task.FromResult("ok"));
+        Assert.Contains("LOST ITS TARGET", result);
     }
 
     [Fact]

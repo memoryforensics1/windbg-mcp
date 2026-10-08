@@ -26,7 +26,10 @@ public static class MetaTools
 
             // VM
             sb.AppendLine($"VM Power:          {s.VmPower}");
-            sb.AppendLine($"VMware Tools:      {s.VmTools}");
+            sb.AppendLine($"VMware Tools:      {s.VmTools}" +
+                          (s.KdConnected && s.KdExecStatus == DebugExecutionStatus.Break
+                              ? " (last known value; not probed while the target is halted)"
+                              : ""));
             sb.AppendLine($"VM IP Address:     {s.VmIpAddress ?? "unknown"}");
             sb.AppendLine();
 
@@ -74,7 +77,7 @@ public static class MetaTools
 
                 if (s.KdExecStatus == DebugExecutionStatus.Break)
                 {
-                    sb.AppendLine($"Break Reason:      {s.KdBreakReason ?? "unknown"}");
+                    sb.AppendLine($"Break Reason:      {s.KdBreakReason ?? (s.KdEngineBusyWith != null ? "not probed yet (engine busy)" : "not probed yet")}");
 
                     sb.AppendLine($"Is Bugcheck:       {s.IsBugcheck}");
                     sb.AppendLine(s.KdFatalExceptionPending
@@ -95,7 +98,11 @@ public static class MetaTools
 
                 sb.AppendLine($"Pending Events:    {s.PendingImportantEventCount} important (stop/session events), " +
                               $"{s.PendingInformationalEventCount} informational (module/process/thread notifications; never a reason the target stopped)");
-                sb.AppendLine($"Wait Pending:      {s.KdWaitPending}");
+                if (s.KdEngineParked)
+                {
+                    sb.AppendLine($"ENGINE PARKED:     the engine thread is waiting for a target that has not (re-)attached.");
+                    sb.AppendLine($"   {WinDbgMCP.Server.KernelDebug.DbgEngManager.EngineWedgedMessage}");
+                }
                 if (s.KdEngineBusyWith != null)
                 {
                     sb.AppendLine($"ENGINE BUSY:       {s.KdEngineBusyWith}");
