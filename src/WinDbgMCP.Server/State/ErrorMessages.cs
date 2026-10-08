@@ -36,6 +36,38 @@ public static class ErrorMessages
         "You can inspect state with kd_execute (e.g., 'k', 'r', 'db addr'), " +
         "or resume execution (kd_continue).";
 
+    public static string TargetAlreadyHalted(string? reason) =>
+        $"Target is already halted ({reason ?? "reason not probed yet"}); there is nothing to break into. " +
+        "Inspect it with kd_execute (e.g. 'k', 'r', 'db addr') or resume it with kd_continue.";
+
+    public static string TargetHaltedAtFatalException(string? reason) =>
+        $"Target is already halted, at a FATAL second-chance exception ({reason ?? "unhandled exception"}); " +
+        "there is nothing to break into and kd_continue would NOT resume it but bugcheck the OS. " +
+        "Analyze now: kd_execute('!analyze -v', timeoutSeconds=300), kd_execute('k'), kd_execute('r'); " +
+        "or vm_snapshot_restore to revert.";
+
+    public const string TargetRebooting =
+        "The engine has no debuggee right now: the target is rebooting (after a crash) or restarted " +
+        "without re-attaching. Nothing can run on the kernel until it is back. Poll get_system_state: " +
+        "it shows TARGET REBOOTED at the initial breakpoint (then kd_continue); if it shows VMware Tools " +
+        "running but the kernel did not re-attach, kd_disconnect then kd_connect.";
+
+    public const string VmPausedKdAttached =
+        "VM is Paused: a paused kernel cannot answer the debugger, so this call would only time out and " +
+        "keep the engine busy. Call vm_resume first.";
+
+    public const string VmOffKdAttached =
+        "VM is Off: the kernel debug session is dead. Call kd_disconnect, then vm_start and kd_connect.";
+
+    public const string VmPowerUnknown =
+        "VM power state is Unknown: vmrun could not report it (VMware Workstation not responding, wrong " +
+        "VMX path, or vmrun timed out). Check VMware, then get_system_state.";
+
+    public const string GuestOpsDuringReboot =
+        "The kernel is rebooting (crash dump and restart) and the guest OS is not up, so guest tools " +
+        "cannot run. Poll get_system_state until VMware Tools reports Running (and the kernel, if it " +
+        "re-attached, is past its initial breakpoint).";
+
     public const string WaitPending =
         "A previous step or continue operation has a pending WaitForEvent. " +
         "Call kd_wait_for_event to check if it completed, or kd_break to interrupt it.";

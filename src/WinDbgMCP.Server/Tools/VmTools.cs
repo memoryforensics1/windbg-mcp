@@ -57,6 +57,12 @@ public static class VmTools
                 var kdNote = "";
                 if (state.State.KdConnected)
                 {
+                    // A graceful stop asks the guest OS to shut down; a crashed OS cannot.
+                    if (!hard && (state.State.IsBugcheck || state.State.KdFatalExceptionPending))
+                        return "NOT EXECUTED: a graceful vm_stop needs a live guest OS, and the guest is crashed " +
+                               (state.State.IsBugcheck ? $"(bugcheck {state.State.BugcheckCode})" : $"(fatal exception: {state.State.KdBreakReason})") +
+                               ". Use vm_stop(hard=true) to power it off, or kd_continue to let it write its dump and reboot.";
+
                     DetachResult detach;
                     try { detach = await dbgEng.DisconnectAsync(); }
                     catch (Exception ex) { detach = new DetachResult(false, $"{ex.GetType().Name}: {ex.Message}"); }

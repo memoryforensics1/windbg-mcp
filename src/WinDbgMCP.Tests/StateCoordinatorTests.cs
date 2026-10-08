@@ -134,7 +134,8 @@ public class StateCoordinatorTests : IDisposable
         var result = await _coordinator.ValidatePreconditionsAsync("vm_start");
         Assert.NotNull(result);
         Assert.False(result!.IsSuccess);
-        Assert.Contains("vm_stop", result.Message);
+        // A running VM is not an error to fix with a power cycle (that would kill KD)
+        Assert.Contains("already running", result.Message);
     }
 
     [Fact]
@@ -161,8 +162,8 @@ public class StateCoordinatorTests : IDisposable
         SetKdConnectedBroken();
         var result = await _coordinator.ValidatePreconditionsAsync("vm_stop");
         Assert.NotNull(result);
-        Assert.True(result!.IsSuccess); // Warning, not error
-        Assert.Contains("WARNING", result.Message);
+        Assert.True(result!.IsSuccess); // Note, not error
+        Assert.Contains("detached first", result.Message);
     }
 
     [Fact]
@@ -1008,7 +1009,7 @@ public class StateCoordinatorTests : IDisposable
 
         var result = await _coordinator.RunToolAsync("vm_stop", () => Task.FromResult("stopped"));
 
-        Assert.Contains("WARNING: Kernel debugger session will be lost", result);
+        Assert.Contains("NOTE: the kernel debugger is attached", result);
         Assert.EndsWith("stopped", result);
     }
 }

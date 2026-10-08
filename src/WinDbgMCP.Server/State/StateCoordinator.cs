@@ -251,7 +251,7 @@ public sealed class StateCoordinator
                 "kd_continue" => RequireKdConnected_TargetBroken_CanResume(),
                 "kd_step" => RequireKdConnected_TargetBroken_NoWaitPending(),
                 "kd_execute" => RequireKdConnected_TargetBroken(),
-                "kd_wait_for_event" => RequireKdConnected(),
+                "kd_wait_for_event" => RequireKdConnected_TargetReachable(),
 
                 // --- Guest tools ---
                 "guest_run_command" => RequireGuestOpsAvailable(),
@@ -615,10 +615,14 @@ public sealed class StateCoordinator
 
     private ToolResult? RequireVmOff()
     {
-        if (_state.VmPower != VmPowerState.Off)
-            return ToolResult.Error(
-                $"VM is {_state.VmPower}. Call vm_stop first, then vm_start.");
-        return null;
+        return _state.VmPower switch
+        {
+            VmPowerState.Off => null,
+            VmPowerState.Running => ToolResult.Error(ErrorMessages.VmAlreadyRunning),
+            VmPowerState.Paused => ToolResult.Error("VM is Paused. Call vm_resume to continue it (or vm_stop then vm_start)."),
+            VmPowerState.Unknown => ToolResult.Error(ErrorMessages.VmPowerUnknown),
+            _ => ToolResult.Error($"VM is {_state.VmPower}. Call vm_stop first, then vm_start."),
+        };
     }
 
     private ToolResult? RequireVmNotOff(bool warnIfKdAttached = false)
@@ -627,16 +631,55 @@ public sealed class StateCoordinator
             return ToolResult.Error(ErrorMessages.VmIsOff);
         if (warnIfKdAttached && _state.KdConnected)
             return ToolResult.Success(
-                "WARNING: Kernel debugger session will be lost. Proceeding.");
+                "NOTE: the kernel debugger is attached; it is detached first (the target is resumed), then the VM is stopped. Proceeding.");
         return null;
+    }
+
+    /// <summary>The VM power state in words the caller can act on.</summary>
+    private ToolResult? VmNotRunning()
+    {
+        return _state.VmPower switch
+        {
+            VmPowerState.Running => null,
+            VmPowerState.Paused => ToolResult.Error(ErrorMessages.VmIsPaused),
+            VmPowerState.Off => ToolResult.Error(ErrorMessages.VmIsOff),
+            VmPowerState.Unknown => ToolResult.Error(ErrorMessages.VmPowerUnknown),
+            _ => ToolResult.Error($"VM is {_state.VmPower}. Start the VM first with vm_start."),
+        };
     }
 
     private ToolResult? RequireVmRunning(bool warnIfKdAttached = false)
     {
-        if (_state.VmPower != VmPowerState.Running)
-            return ToolResult.Error(
-                $"VM is {_state.VmPower}. Start the VM first with vm_start.");
+        var notRunning = VmNotRunning();
+        if (notRunning != null)
+            return notRunning;
+        if (warnIfKdAttached && _state.KdConnected)
+            return ToolResult.Success(
+                "NOTE: the kernel debugger stays attached to a paused VM, but a paused kernel cannot answer it: " +
+                "every kd_* call will time out until vm_resume. Proceeding.");
         return null;
+    }
+
+    /// <summary>
+    /// For every tool that needs the kernel to answer: the VM must be running and
+    /// the engine must have a debuggee. Returns the reason it cannot, else null.
+    /// </summary>
+    private ToolResult? KdTargetUnreachable()
+    {
+        if (_state.VmPower == VmPowerState.Paused)
+            return ToolResult.Error(ErrorMessages.VmPausedKdAttached);
+        if (_state.VmPower == VmPowerState.Off)
+            return ToolResult.Error(ErrorMessages.VmOffKdAttached);
+        if (_state.KdExecStatus is DebugExecutionStatus.NoDebuggee or DebugExecutionStatus.Uninitialized)
+            return ToolResult.Error(ErrorMessages.TargetRebooting);
+        return null;
+    }
+
+    private ToolResult? RequireKdConnected_TargetReachable()
+    {
+        if (!_state.KdConnected)
+            return ToolResult.Error(ErrorMessages.KdNotConnected);
+        return KdTargetUnreachable();
     }
 
     private ToolResult? RequireVmPaused()
@@ -656,9 +699,9 @@ public sealed class StateCoordinator
 
     private ToolResult? RequireVmRunning_KdNotConnected()
     {
-        if (_state.VmPower != VmPowerState.Running)
-            return ToolResult.Error(
-                $"VM is {_state.VmPower}. Start the VM first with vm_start.");
+        var notRunning = VmNotRunning();
+        if (notRunning != null)
+            return notRunning;
         if (_state.KdConnected)
         {
             // "Call kd_disconnect first" would send the model in a circle when the
@@ -684,10 +727,15 @@ public sealed class StateCoordinator
         if (!_state.KdConnected)
             return ToolResult.Error(ErrorMessages.KdNotConnected);
 
+        var unreachable = KdTargetUnreachable();
+        if (unreachable != null)
+            return unreachable;
+
         if (_state.KdExecStatus != DebugExecutionStatus.Break)
             return ToolResult.Error(
                 $"Target is in '{_state.KdExecStatus}' state — cannot read memory or execute " +
-                "commands while the target is running. Call kd_break to halt the target first.");
+                "commands while the target is running. Call kd_break to halt the target first" +
+                (_state.KdModuleFlood ? " (the kernel is loading modules in bulk right now, so kd_break may need up to 60 s)." : "."));
 
         if (_state.KdWaitPending)
             return ToolResult.Error(ErrorMessages.WaitPending);
@@ -700,12 +748,18 @@ public sealed class StateCoordinator
         if (!_state.KdConnected)
             return ToolResult.Error(ErrorMessages.KdNotConnected);
 
+        var unreachable = KdTargetUnreachable();
+        if (unreachable != null)
+            return unreachable;
+
         if (_state.KdExecStatus == DebugExecutionStatus.Break)
         {
             if (_state.IsBugcheck)
                 return ToolResult.Error(ErrorMessages.BsodCannotBreak(_state.BugcheckCode));
+            if (_state.KdFatalExceptionPending)
+                return ToolResult.Error(ErrorMessages.TargetHaltedAtFatalException(_state.KdBreakReason));
 
-            return ToolResult.Error(ErrorMessages.TargetAlreadyBroken);
+            return ToolResult.Error(ErrorMessages.TargetAlreadyHalted(_state.KdBreakReason));
         }
 
         return null;
@@ -716,11 +770,16 @@ public sealed class StateCoordinator
         if (!_state.KdConnected)
             return ToolResult.Error(ErrorMessages.KdNotConnected);
 
+        var unreachable = KdTargetUnreachable();
+        if (unreachable != null)
+            return unreachable;
+
         if (_state.KdExecStatus != DebugExecutionStatus.Break)
             return ToolResult.Error(
                 $"Target is in '{_state.KdExecStatus}' state — already running. " +
                 "Call kd_break to halt it first, or kd_wait_for_event to " +
-                "wait for a breakpoint hit.");
+                "wait for a breakpoint hit" +
+                (_state.KdModuleFlood ? " (the kernel is loading modules in bulk right now, so kd_break may need up to 60 s)." : "."));
 
         // A bugcheck is deliberately NOT blocked: continuing lets the kernel finish
         // the crash dump and reboot, which is one of the documented recovery paths.
@@ -748,6 +807,9 @@ public sealed class StateCoordinator
         if (_state.VmPower == VmPowerState.Paused)
             return ToolResult.Error(ErrorMessages.VmIsPaused);
 
+        if (_state.VmPower == VmPowerState.Unknown)
+            return ToolResult.Error(ErrorMessages.VmPowerUnknown);
+
         if (_state.VmPower != VmPowerState.Running)
             return ToolResult.Error(
                 $"VM is {_state.VmPower}. Cannot execute guest operations. Start the VM with vm_start.");
@@ -757,9 +819,18 @@ public sealed class StateCoordinator
         {
             if (_state.IsBugcheck)
                 return ToolResult.Error(ErrorMessages.BsodGuestOpsUnavailable(_state.BugcheckCode));
+            if (_state.KdFatalExceptionPending)
+                return ToolResult.Error("VM is halted at a fatal exception; the guest OS is effectively crashed and " +
+                                        "guest tools cannot run. " + ErrorMessages.FatalExceptionPending(_state.KdBreakReason));
 
             return ToolResult.Error(ErrorMessages.GuestFrozenByKd);
         }
+
+        // A kernel that is rebooting after a crash has no OS to run guest tools in,
+        // even while VMware's cached tools state still says "running".
+        if (_state.KdConnected && _state.KdExecStatus is DebugExecutionStatus.NoDebuggee or DebugExecutionStatus.Uninitialized
+            && _state.VmTools != VmToolsState.Running)
+            return ToolResult.Error(ErrorMessages.GuestOpsDuringReboot);
 
         if (_state.VmTools != VmToolsState.Running)
             return ToolResult.Error(ErrorMessages.ToolsNotResponding);
