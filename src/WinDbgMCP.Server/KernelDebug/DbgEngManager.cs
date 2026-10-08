@@ -47,6 +47,7 @@ public sealed class DbgEngManager : IDisposable
 
     public bool IsConnected => _client != null;
     public int PendingEventCount => _eventCallbacks.PendingCount;
+    public int PendingInformationalEventCount => _eventCallbacks.PendingInformationalCount;
     public bool RebootDetected => _eventCallbacks.RebootDetected;
     /// <summary>A second-chance (unhandled) exception is the current event: the next resume bugchecks the OS.</summary>
     public bool SecondChancePending => _eventCallbacks.SecondChancePending;

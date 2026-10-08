@@ -46,6 +46,7 @@ public sealed class StateCoordinator
     /// <summary>Describes the engine command still running past its tool timeout, or null when idle.</summary>
     public Func<string?>? GetEngineBusy { get; set; }
     public Func<int>? GetPendingEventCount { get; set; }
+    public Func<int>? GetPendingInformationalEventCount { get; set; }
     public Func<Task<(bool IsBugcheck, string? BugcheckCode, string? LastEvent)>>? DetectBugcheckAsync { get; set; }
     /// <summary>True while the current halt is a second-chance exception (the next resume bugchecks).</summary>
     public Func<bool>? IsSecondChancePending { get; set; }
@@ -132,6 +133,7 @@ public sealed class StateCoordinator
             if (drained != null)
                 _pendingEvents.AddRange(drained);
             _state.PendingEventCount = GetPendingEventCount?.Invoke() ?? 0;
+            _state.PendingInformationalEventCount = GetPendingInformationalEventCount?.Invoke() ?? 0;
         }
         catch (Exception ex)
         {
@@ -339,6 +341,7 @@ public sealed class StateCoordinator
 
         // 2. Event queue count
         _state.PendingEventCount = GetPendingEventCount?.Invoke() ?? 0;
+        _state.PendingInformationalEventCount = GetPendingInformationalEventCount?.Invoke() ?? 0;
         _state.KdEngineBusyWith = _state.KdConnected ? GetEngineBusy?.Invoke() : null;
 
         // 2.5 BSOD detection — check once when transitioning INTO break state.

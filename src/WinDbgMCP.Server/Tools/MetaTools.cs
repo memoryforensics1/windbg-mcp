@@ -74,7 +74,8 @@ public static class MetaTools
                     }
                 }
 
-                sb.AppendLine($"Pending Events:    {s.PendingEventCount}");
+                sb.AppendLine($"Pending Events:    {s.PendingImportantEventCount} important (stop/session events), " +
+                              $"{s.PendingInformationalEventCount} informational (module/process/thread notifications; never a reason the target stopped)");
                 sb.AppendLine($"Wait Pending:      {s.KdWaitPending}");
                 if (s.KdEngineBusyWith != null)
                 {

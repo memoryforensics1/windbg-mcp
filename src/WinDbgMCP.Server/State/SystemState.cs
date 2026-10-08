@@ -19,6 +19,10 @@ public sealed class SystemState
     public string? KdBreakReason { get; set; }
     public bool KdWaitPending { get; set; }
     public int PendingEventCount { get; set; }
+    // Of PendingEventCount, how many are module/process/thread notifications
+    // (informational, never a reason the target stopped).
+    public int PendingInformationalEventCount { get; set; }
+    public int PendingImportantEventCount => Math.Max(0, PendingEventCount - PendingInformationalEventCount);
 
     // BSOD detection
     public bool IsBugcheck { get; set; }

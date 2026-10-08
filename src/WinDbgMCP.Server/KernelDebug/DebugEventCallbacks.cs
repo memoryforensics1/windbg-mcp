@@ -35,6 +35,10 @@ public sealed class DebugEventCallbacks : DebugBaseEventCallbacks
     }
 
     public int PendingCount => _eventQueue.Count;
+    /// <summary>Queued module/process/thread events: noise to the model, never a reason to stop.</summary>
+    public int PendingInformationalCount => _eventQueue.Count(e => IsInformational(e.Type));
+    /// <summary>Queued events that stop the target or change the session (bugcheck, breakpoint, reboot...).</summary>
+    public int PendingImportantCount => _eventQueue.Count(e => !IsInformational(e.Type));
     public DEBUG_STATUS LastExecutionStatus => _lastExecutionStatus;
 
     /// <summary>
@@ -305,11 +309,15 @@ public sealed class DebugEventCallbacks : DebugBaseEventCallbacks
             // the initial breakpoint. Mark it as a breaking event so the pump stops.
             _rebootDetected = true;
             _hasBreakingEvent = true;
+            // Module/process/thread events of the kernel that just died are worthless
+            // and would only bury the events that matter; keep the important ones.
+            var discarded = DiscardQueuedInformationalEvents();
             Enqueue(new DebugEvent
             {
                 Type = DebugEventKind.TargetRebooted,
                 Details = "Target rebooted. Previous kernel state is gone; " +
-                          "debugger reconnects at the initial breakpoint."
+                          "debugger reconnects at the initial breakpoint." +
+                          (discarded > 0 ? $" ({discarded} informational module/process/thread events of the old kernel discarded.)" : "")
             });
         }
         return HRESULT.S_OK;
@@ -355,6 +363,20 @@ public sealed class DebugEventCallbacks : DebugBaseEventCallbacks
             events.Add(evt);
         }
         return events;
+    }
+
+    private int DiscardQueuedInformationalEvents()
+    {
+        var kept = new List<DebugEvent>();
+        var dropped = 0;
+        while (_eventQueue.TryDequeue(out var e))
+        {
+            if (IsInformational(e.Type)) dropped++;
+            else kept.Add(e);
+        }
+        foreach (var e in kept)
+            _eventQueue.Enqueue(e);
+        return dropped;
     }
 
     public static bool IsInformational(DebugEventKind kind) => kind is
