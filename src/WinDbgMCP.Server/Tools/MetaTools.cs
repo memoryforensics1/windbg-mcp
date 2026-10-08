@@ -36,6 +36,10 @@ public static class MetaTools
             {
                 sb.AppendLine($"KD Transport:      {s.KdTransportType}");
                 sb.AppendLine($"Execution Status:  {s.KdExecStatus}");
+                sb.AppendLine(s.KdRebootGeneration == 0
+                    ? "Reboot Generation: 0 (the kernel has not rebooted since kd_connect)"
+                    : $"Reboot Generation: {s.KdRebootGeneration} (the kernel rebooted {s.KdRebootGeneration} time(s) since kd_connect; " +
+                      $"events tagged reboot#{s.KdRebootGeneration} belong to the current kernel, lower or untagged ones to an earlier one)");
                 if (s.KdModuleFlood)
                 {
                     sb.AppendLine($"Kernel Activity:   booting / loading drivers in bulk ({s.KdModuleEventsLast10s} module events in the last 10 s).");

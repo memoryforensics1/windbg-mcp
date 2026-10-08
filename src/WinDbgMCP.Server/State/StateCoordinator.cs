@@ -48,6 +48,7 @@ public sealed class StateCoordinator
     public Func<int>? GetPendingEventCount { get; set; }
     public Func<int>? GetPendingInformationalEventCount { get; set; }
     public Func<int>? GetModuleEventsLast10s { get; set; }
+    public Func<int>? GetRebootGeneration { get; set; }
     public Func<Task<(bool IsBugcheck, string? BugcheckCode, string? LastEvent)>>? DetectBugcheckAsync { get; set; }
     /// <summary>True while the current halt is a second-chance exception (the next resume bugchecks).</summary>
     public Func<bool>? IsSecondChancePending { get; set; }
@@ -324,6 +325,7 @@ public sealed class StateCoordinator
                 _state.KdBreakReason = null;
             }
             _state.KdRebootDetected = rebooted;
+            _state.KdRebootGeneration = GetRebootGeneration?.Invoke() ?? 0;
         }
         else if (_state.KdConnected && IsDbgEngConnected?.Invoke() == false)
         {

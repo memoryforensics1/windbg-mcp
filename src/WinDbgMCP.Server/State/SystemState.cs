@@ -43,6 +43,8 @@ public sealed class SystemState
 
     // Target rebooted since the last kd_continue; engine reconnected at the initial breakpoint
     public bool KdRebootDetected { get; set; }
+    // Reboots since kd_connect; debug events are tagged "reboot#N" with the generation they belong to
+    public int KdRebootGeneration { get; set; }
 
     // === Guest Exec Layer ===
     /// <summary>

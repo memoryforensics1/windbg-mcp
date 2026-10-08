@@ -75,6 +75,11 @@ public sealed class DebugEventCallbacks : DebugBaseEventCallbacks
     public bool HasBreakingEvent => _hasBreakingEvent;
     public bool RebootDetected => _rebootDetected;
 
+    // Incremented on every REBOOT; stamped on every event from then on.
+    private int _rebootGeneration;
+    public int RebootGeneration => _rebootGeneration;
+    public void ResetRebootGeneration() => Interlocked.Exchange(ref _rebootGeneration, 0);
+
     /// <summary>True while the target sits at an unhandled (second-chance) exception.</summary>
     public bool SecondChancePending => _secondChancePending;
     public void ClearSecondChancePending() => _secondChancePending = false;
@@ -93,6 +98,7 @@ public sealed class DebugEventCallbacks : DebugBaseEventCallbacks
 
     private void Enqueue(DebugEvent evt)
     {
+        evt.Generation = _rebootGeneration;
         _eventQueue.Enqueue(evt);
         try { EventRaised?.Invoke(evt); }
         catch (Exception ex) { _logger.LogDebug(ex, "EventRaised handler failed"); }
@@ -337,14 +343,15 @@ public sealed class DebugEventCallbacks : DebugBaseEventCallbacks
             // the initial breakpoint. Mark it as a breaking event so the pump stops.
             _rebootDetected = true;
             _hasBreakingEvent = true;
+            var generation = Interlocked.Increment(ref _rebootGeneration);
             // Module/process/thread events of the kernel that just died are worthless
             // and would only bury the events that matter; keep the important ones.
             var discarded = DiscardQueuedInformationalEvents();
             Enqueue(new DebugEvent
             {
                 Type = DebugEventKind.TargetRebooted,
-                Details = "Target rebooted. Previous kernel state is gone; " +
-                          "debugger reconnects at the initial breakpoint." +
+                Details = $"Target rebooted (reboot #{generation} of this session; events from now on are tagged reboot#{generation}). " +
+                          "Previous kernel state is gone; debugger reconnects at the initial breakpoint." +
                           (discarded > 0 ? $" ({discarded} informational module/process/thread events of the old kernel discarded.)" : "")
             });
         }

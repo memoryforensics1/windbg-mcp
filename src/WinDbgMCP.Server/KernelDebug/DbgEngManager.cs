@@ -52,6 +52,8 @@ public sealed class DbgEngManager : IDisposable
     public int ModuleEventsInLast10s => _eventCallbacks.ModuleEventsInLast10s;
     public bool IsModuleFlood => _eventCallbacks.IsModuleFlood;
     public bool RebootDetected => _eventCallbacks.RebootDetected;
+    /// <summary>How many times the kernel has rebooted since kd_connect; events carry this tag.</summary>
+    public int RebootGeneration => _eventCallbacks.RebootGeneration;
     /// <summary>A second-chance (unhandled) exception is the current event: the next resume bugchecks the OS.</summary>
     public bool SecondChancePending => _eventCallbacks.SecondChancePending;
     public List<DebugEvent> DrainEvents() => _eventCallbacks.DrainEvents();
@@ -175,6 +177,7 @@ public sealed class DbgEngManager : IDisposable
             _eventCallbacks.ClearEvents();
             _eventCallbacks.ClearBreakingEventFlag();
             _eventCallbacks.ClearRebootFlag();
+            _eventCallbacks.ResetRebootGeneration();
             _eventCallbacks.TryTakePendingBreakIn(out _);
             _breakWithStatusAddr = 0;
             _interruptRequested = false;
