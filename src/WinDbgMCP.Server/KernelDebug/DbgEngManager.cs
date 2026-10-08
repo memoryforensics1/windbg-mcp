@@ -386,6 +386,13 @@ public sealed class DbgEngManager : IDisposable
         {
             // Use the cached value from event callbacks (thread-safe)
             var status = _eventCallbacks.LastExecutionStatus;
+
+            // While the pump is enabled a BREAK is only its own yield break-in, which
+            // it resumes within milliseconds (the same rule WaitForEventAsync uses);
+            // reporting it as a halt made the state say "Break" right after a resume.
+            if (status == DEBUG_STATUS.BREAK && _thread.PumpEnabled && !_eventCallbacks.HasBreakingEvent)
+                return DebugExecutionStatus.Go;
+
             return (DebugExecutionStatus)(int)status;
         }
         catch
