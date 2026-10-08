@@ -1055,7 +1055,7 @@ public sealed class DbgEngManager : IDisposable
                     Details = status == DbgStatusBugcheckSecond
                         ? "BSOD: second bugcheck break-in (crash dump written). kd_continue should reboot the VM; " +
                           "if it keeps breaking here, use vm_stop(hard=true) + vm_start"
-                        : "BSOD: kernel entered the bugcheck handler. Run kd_execute('!analyze -v') now; " +
+                        : "BSOD: kernel entered the bugcheck handler. Run kd_execute('!analyze -v', timeoutSeconds=300) now; " +
                           "kd_continue proceeds to the crash dump and reboot (then kd_wait_for_event for TARGET REBOOTED)",
                     Address = address
                 });

@@ -105,7 +105,7 @@ public static class ErrorMessages
 
     // === BSOD-Specific Errors ===
     public const string BsodRecoveryOptions =
-        "Options: (1) kd_execute('!analyze -v') to analyze the crash. " +
+        "Options: (1) kd_execute('!analyze -v', timeoutSeconds=300) to analyze the crash (first-time symbol loading takes minutes). " +
         "(2) kd_continue to let the crash run its course: the kernel writes the dump and " +
         "reboots (some targets break in a second time first — then kd_wait_for_event shows " +
         "another Bugcheck event and kd_continue again); kd_wait_for_event / get_system_state " +
@@ -124,7 +124,7 @@ public static class ErrorMessages
         "it, so the OS is effectively crashed: guest operations will NOT work, and the next kd_continue passes " +
         "the exception back (gn), which bugchecks the machine (then the usual BSOD sequence: dump, reboot, " +
         "initial breakpoint, kd_continue). Analyze NOW while the faulting context is intact: " +
-        "kd_execute('!analyze -v') names the bugcheck it will become and the faulting driver; kd_execute('k') " +
+        "kd_execute('!analyze -v', timeoutSeconds=300) names the bugcheck it will become and the faulting driver; kd_execute('k') " +
         "shows the faulting stack; kd_execute('r') the registers. Or vm_snapshot_restore to revert.";
 
     public static string BsodGuestOpsUnavailable(string? bugcheckCode) =>
