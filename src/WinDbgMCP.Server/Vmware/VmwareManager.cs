@@ -452,6 +452,10 @@ public sealed class VmwareManager
         }
     }
 
+    /// <summary>VM encryption and guest passwords must never reach a log line.</summary>
+    internal static string RedactSecrets(string args) =>
+        System.Text.RegularExpressions.Regex.Replace(args, @"(-(?:vp|gp)\s+)""[^""]*""", "$1\"<redacted>\"");
+
     private async Task<ProcessResult> RunVmrunCoreAsync(
         string args, TimeSpan timeout, CancellationToken ct)
     {
@@ -462,7 +466,7 @@ public sealed class VmwareManager
         if (!string.IsNullOrEmpty(_vmPassword))
             args = $"-vp \"{_vmPassword}\" {args}";
 
-        _logger.LogDebug("vmrun {Args}", args);
+        _logger.LogDebug("vmrun {Args}", RedactSecrets(args));
 
         var psi = new ProcessStartInfo
         {
