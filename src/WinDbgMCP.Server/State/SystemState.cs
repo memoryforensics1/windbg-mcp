@@ -43,6 +43,9 @@ public sealed class SystemState
     // (e.g. "!analyze -v, running for 95 s"); every other kernel tool waits behind it.
     public string? KdEngineBusyWith { get; set; }
 
+    /// <summary>Seconds a kd_connect has been waiting for the kernel to answer; null when none is.</summary>
+    public int? KdConnectPendingSeconds { get; set; }
+
     // The engine thread is parked in a target-less wait that did not answer a probe
     // (graceful restart while attached, or a reboot still in progress).
     public bool KdEngineParked { get; set; }

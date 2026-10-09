@@ -4,6 +4,7 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using ModelContextProtocol.Server;
 using WinDbgMCP.Server.Configuration;
+using WinDbgMCP.Server.Diagnostics;
 using WinDbgMCP.Server.Guest;
 using WinDbgMCP.Server.KernelDebug;
 using WinDbgMCP.Server.Notifications;
@@ -30,6 +31,20 @@ builder.Logging.AddConsole(options =>
 // Bind configuration
 var config = new ServerConfig();
 builder.Configuration.Bind(config);
+ServerInfo.SettingsPath = Path.Combine(exeDir, "appsettings.json");
+
+// Also log to a file: stderr is not kept by every MCP client, and the log is the
+// first thing needed after a bad run. Logging:File:Directory overrides the default.
+var logDir = builder.Configuration["Logging:File:Directory"] is { Length: > 0 } configuredDir
+    ? Environment.ExpandEnvironmentVariables(configuredDir)
+    : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "WinDbgMCP", "logs");
+var fileLogger = FileLoggerProvider.TryCreate(logDir,
+    new[] { config.Vm.VmPassword, config.Vm.GuestPassword, config.KernelDebug.Kdnet.Key }, LogLevel.Trace);
+if (fileLogger != null)
+{
+    builder.Logging.AddProvider(fileLogger);
+    ServerInfo.LogFilePath = fileLogger.FilePath;
+}
 
 // Register services as singletons (single MCP server process, single VM)
 builder.Services.AddSingleton(config);
@@ -70,6 +85,8 @@ builder.Services.AddSingleton<StateCoordinator>(sp =>
     coordinator.IsDbgEngConnected = () => dbgEng.IsConnected;
     coordinator.IsEngineParked = () => dbgEng.EngineWedged;
     coordinator.GetEngineBusy = () => dbgEng.BusyDescription;
+    coordinator.GetConnectPendingSeconds = () => dbgEng.ConnectPendingSeconds;
+    dbgEng.LateConnectCompleted = coordinator.OnLateConnect;
     coordinator.GetDbgEngExecutionStatus = () => dbgEng.GetExecutionStatus();
     coordinator.GetPendingEventCount = () => dbgEng.PendingEventCount;
     coordinator.GetPendingInformationalEventCount = () => dbgEng.PendingInformationalEventCount;
@@ -128,7 +145,13 @@ builder.Services
     .WithStdioServerTransport()
     .WithTools(toolTypes);
 
-await builder.Build().RunAsync();
+var app = builder.Build();
+var startupLog = app.Services.GetRequiredService<ILoggerFactory>().CreateLogger("WinDbgMCP.Server.Startup");
+startupLog.LogInformation("Starting {Build}", ServerInfo.BuildLine());
+startupLog.LogInformation("Binary: {Path}", ServerInfo.AssemblyPath);
+startupLog.LogInformation("Settings: {Path}; kernel debug transport: {Transport}", ServerInfo.SettingsPath, ServerInfo.TransportLine(config));
+startupLog.LogInformation("Log file: {Path}", ServerInfo.LogFilePath ?? "(none: stderr only)");
+await app.RunAsync();
 
 static string BuildServerInstructions(ServerConfig config)
 {
@@ -194,7 +217,7 @@ static string BuildServerInstructions(ServerConfig config)
     sb.AppendLine();
 
     sb.AppendLine("### Kernel Debug Tools (7) — requires `kd_connect` first");
-    sb.AppendLine("- `kd_connect` — Attach to kernel via KDNET. VM must have debug boot enabled. Target breaks on connect.");
+    sb.AppendLine("- `kd_connect` — Attach to the kernel via KDNET or serial (get_system_state shows 'KD Config'). VM must have debug boot enabled. Target breaks on connect. A connect the kernel does not answer within the budget comes back PENDING and completes on its own; it cannot be cancelled.");
     sb.AppendLine("- `kd_disconnect` — Detach. Resumes target so VM keeps running.");
     sb.AppendLine("- `kd_break` — Halt running target (Ctrl+Break). After breaking, use kd_execute.");
     sb.AppendLine("- `kd_continue` — Resume target (go). Returns immediately. Guest ops require target running.");

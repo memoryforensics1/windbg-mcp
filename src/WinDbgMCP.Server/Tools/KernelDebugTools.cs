@@ -11,11 +11,13 @@ namespace WinDbgMCP.Server.Tools;
 public static class KernelDebugTools
 {
     [McpServerTool(Name = "kd_connect"), Description(
-        "Connect to the kernel debug target via KDNET or serial. " +
-        "The VM must be running with debug boot enabled. " +
-        "Target will break on connect (initial breakpoint). " +
-        "Optionally provide a raw connection string (e.g. 'net:port=50000,key=...' or 'com:pipe,port=\\\\.\\pipe\\com_1,resets=0,reconnect'); " +
-        "if omitted, connects using the defaults from appsettings.json.")]
+        "Connect to the kernel debug target via KDNET or serial (get_system_state's 'KD Config' line shows which one " +
+        "this server is set up for). The VM must be running with debug boot enabled and the guest's transport " +
+        "('bcdedit /dbgsettings') must match. Target will break on connect (initial breakpoint). A normal connect takes " +
+        "3-10 s. If the kernel has not answered within the budget the result is PENDING: the attempt keeps waiting and " +
+        "completes on its own (the next tool result then reports KERNEL DEBUGGER CONNECTED); it cannot be cancelled. " +
+        "Optionally provide a raw connection string (e.g. 'net:port=50000,key=...' or " +
+        "'com:pipe,port=\\\\.\\pipe\\com_1,reconnect'); if omitted, connects using the defaults from appsettings.json.")]
     public static Task<string> KdConnect(
         StateCoordinator state,
         DbgEngManager dbgEng,
@@ -39,16 +41,16 @@ public static class KernelDebugTools
 
                 return result;
             }
+            catch (KdConnectPendingException pending)
+            {
+                return pending.Message;
+            }
             catch (OperationCanceledException)
             {
-                var budget = config.Timeouts.KdConnectSeconds + config.Timeouts.KdInitialBreakSeconds + 15;
-                return "kd_connect timed out: the kernel debug target did not answer within " +
-                       $"{budget}s. If the VM was started or reset less than a minute ago, KDNET is still initialising: " +
-                       "wait 30-60 s and retry (nothing is wrong). Otherwise verify: " +
-                       "(1) the VM is running with debug boot enabled (bcdedit /debug on + KDNET configured); " +
-                       "(2) the KDNET port/key matches appsettings.json; " +
-                       "(3) no other debugger is attached; " +
-                       "(4) the host firewall allows the UDP port inbound.";
+                var budget = config.Timeouts.KdConnectSeconds;
+                return $"kd_connect did not start within {budget}s: the engine thread was occupied by an earlier " +
+                       "operation, so nothing was attempted. get_system_state shows what occupies it (ENGINE BUSY); " +
+                       "retry when it is free.";
             }
             catch (Exception ex)
             {

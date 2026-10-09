@@ -46,6 +46,24 @@ public sealed class DbgEngManager : IDisposable
     private const long DbgStatusFatal = 5;
 
     public bool IsConnected => _client != null;
+
+    private long _connectPendingSinceTicks;
+
+    /// <summary>Seconds a kd_connect has been waiting for the kernel, or null when none is.</summary>
+    public int? ConnectPendingSeconds
+    {
+        get
+        {
+            var since = Interlocked.Read(ref _connectPendingSinceTicks);
+            return since == 0 ? null : (int)((Environment.TickCount64 - since) / 1000);
+        }
+    }
+
+    /// <summary>
+    /// Raised (on the engine thread) when a kd_connect that already returned PENDING
+    /// finishes: connected, or failed with the message.
+    /// </summary>
+    public Action<bool, string, KdTransport>? LateConnectCompleted { get; set; }
     public int PendingEventCount => _eventCallbacks.PendingCount;
     public int PendingInformationalEventCount => _eventCallbacks.PendingInformationalCount;
     /// <summary>Module load/unload events in the last 10 s; a burst means the kernel is booting and drops break-ins.</summary>
@@ -86,9 +104,23 @@ public sealed class DbgEngManager : IDisposable
     /// </summary>
     public async Task<string> ConnectKernelAsync(string? connectionString = null, CancellationToken ct = default)
     {
-        // The work item covers attach + the initial-break wait; the outer timeout
-        // must not expire first or the target is left halted behind a live client.
-        var timeout = TimeSpan.FromSeconds(_config.Timeouts.KdConnectSeconds + _config.Timeouts.KdInitialBreakSeconds + 15);
+        // After this budget kd_connect returns PENDING; the attempt itself keeps
+        // waiting on the engine thread (that wait cannot be cancelled) and reports
+        // its outcome as an event when the kernel finally answers.
+        var timeout = TimeSpan.FromSeconds(_config.Timeouts.KdConnectSeconds);
+
+        var (connStr, transport) = ResolveConnection(connectionString);
+
+        // A serial pipe that is missing or held by another client makes AttachKernel
+        // fail at once with a bare HRESULT ("reconnect" only waits for a pipe that
+        // does not exist yet). VMware also needs a moment after a client leaves
+        // before it accepts the next one, so wait for the pipe briefly first.
+        if (transport == KdTransport.Serial && SerialPipeName(connStr) is { } pipe)
+        {
+            var pipeProblem = await Task.Run(() => WaitForSerialPipe(pipe, 10000), ct);
+            if (pipeProblem != null)
+                throw new InvalidOperationException(pipeProblem);
+        }
 
         // A stale client's pump may be parked in a target-less wait: try to free the
         // thread, and if it does not answer, report the engine as wedged. A wedge
@@ -131,8 +163,47 @@ public sealed class DbgEngManager : IDisposable
             }
         }
 
-        return await _thread.ExecuteAsync(() =>
+        var attempt = new ConnectAttempt(transport);
+        try
         {
+            return await _thread.ExecuteAsync(() =>
+            {
+                attempt.Started = true;
+                Interlocked.Exchange(ref _connectPendingSinceTicks, Environment.TickCount64);
+                try
+                {
+                    var result = AttachAndWait(connStr, transport);
+                    attempt.Result = result;
+                    if (Interlocked.CompareExchange(ref attempt.State, ConnectAttempt.Done, ConnectAttempt.Waiting) == ConnectAttempt.CallerGaveUp)
+                        ReportLateConnect(true, result, transport);
+                    return result;
+                }
+                catch (Exception ex)
+                {
+                    attempt.Error = ex;
+                    if (Interlocked.CompareExchange(ref attempt.State, ConnectAttempt.Done, ConnectAttempt.Waiting) == ConnectAttempt.CallerGaveUp)
+                        ReportLateConnect(false, ex.Message, transport);
+                    throw;
+                }
+                finally
+                {
+                    Interlocked.Exchange(ref _connectPendingSinceTicks, 0);
+                }
+            }, timeout, "kd_connect (waiting for the kernel to answer)");
+        }
+        catch (OperationCanceledException) when (attempt.Started)
+        {
+            if (Interlocked.CompareExchange(ref attempt.State, ConnectAttempt.CallerGaveUp, ConnectAttempt.Waiting) == ConnectAttempt.Waiting)
+                throw new KdConnectPendingException(PendingMessage(transport, (int)timeout.TotalSeconds));
+            // It finished right at the deadline.
+            if (attempt.Error != null) throw attempt.Error;
+            return attempt.Result!;
+        }
+    }
+
+    /// <summary>Runs on the engine thread: creates the client, attaches and waits for the kernel.</summary>
+    private string AttachAndWait(string connStr, KdTransport transport)
+    {
             // Reaching here with a live client means the coordinator already
             // considers the session lost (NoDebuggee); tear the old one down
             // rather than leaking it or wedging kd_connect/kd_disconnect.
@@ -142,7 +213,7 @@ public sealed class DbgEngManager : IDisposable
                 _thread.PumpEnabled = false;
                 // ACTIVE_DETACH is the mode verified live to resume a halted kernel.
                 try { _client.TryEndSession(DEBUG_END.ACTIVE_DETACH); } catch { }
-                _client = null;
+                DropClient();
             }
 
             _logger.LogInformation("Creating DbgEng client...");
@@ -193,47 +264,44 @@ public sealed class DbgEngManager : IDisposable
             _client.Symbols.SymbolPath = _config.KernelDebug.SymbolPath;
             _logger.LogInformation("Symbol path: {Path}", _config.KernelDebug.SymbolPath);
 
-            // Build connection string
-            string connStr;
-            KdTransport transport;
-            if (connectionString != null)
-            {
-                connStr = connectionString;
-                transport = connectionString.StartsWith("net:", StringComparison.OrdinalIgnoreCase)
-                    ? KdTransport.KDNET
-                    : KdTransport.Serial;
-            }
-            else if (_config.KernelDebug.Transport.Equals("kdnet", StringComparison.OrdinalIgnoreCase))
-            {
-                connStr = $"net:port={_config.KernelDebug.Kdnet.Port},key={_config.KernelDebug.Kdnet.Key}";
-                transport = KdTransport.KDNET;
-            }
-            else if (_config.KernelDebug.Transport.Equals("serial", StringComparison.OrdinalIgnoreCase))
-            {
-                connStr = $"com:pipe,port={_config.KernelDebug.Serial.PipeName},resets=0,reconnect";
-                transport = KdTransport.Serial;
-            }
-            else
-            {
-                throw new InvalidOperationException(
-                    $"Unknown kernel debug transport: '{_config.KernelDebug.Transport}'. " +
-                    "Use 'kdnet' or 'serial'.");
-            }
-
-            _logger.LogInformation("Attaching kernel: {ConnStr}", connStr);
+            _logger.LogInformation("Attaching kernel: {ConnStr}", RedactConnectionString(connStr));
+            _outputCapture.Clear();
 
             // Attach to kernel
             var attachHr = _client.TryAttachKernel(DEBUG_ATTACH.KERNEL_CONNECTION, connStr);
             if (attachHr != HRESULT.S_OK)
+            {
+                DropClient();
                 throw new InvalidOperationException(
-                    $"AttachKernel failed: {attachHr}. " + ErrorMessages.KdConnectFailed);
+                    $"AttachKernel failed: {DescribeHResult(attachHr)}. " + ErrorMessages.KdConnectFailed);
+            }
 
-            _logger.LogInformation("AttachKernel succeeded, waiting for initial breakpoint...");
+            _logger.LogInformation("AttachKernel succeeded; waiting for the kernel to answer (initial breakpoint)...");
 
-            var initialBreakMs = _config.Timeouts.KdInitialBreakSeconds * 1000;
-            var waitHr = WaitForEventInterruptible(initialBreakMs, initialBreakMs, breakInEarly: false);
+            // AttachKernel returns before a single packet is exchanged: the KD link
+            // forms inside WaitForEvent. Two facts drive the wait below, both seen
+            // live: (1) right after a snapshot restore the kernel ignored the
+            // engine's own connect polling for 15 s and answered the first explicit
+            // break-in within 2 s, so break-ins are sent early and repeatedly;
+            // (2) a target that never answers (KDNET still initialising, wrong
+            // key, debug boot off) keeps WaitForEvent(INFINITE) blocked for ever,
+            // and the original code's "timeout" left the engine thread stuck in it,
+            // which made every later kernel tool time out too.
+            lock (_pendingLock) _pendingEngineLine = null;
+            var engineSoFar = new System.Text.StringBuilder();
+            var waitHr = WaitForKernelToAnswer(engineSoFar);
+            string engineText;
+            lock (engineSoFar) engineText = engineSoFar.Append(_outputCapture.GetAndClear()).ToString();
+            _logger.LogInformation("Engine output during connect (hr={Hr}): {Out}", waitHr, engineText);
 
-            if (waitHr == HRESULT.S_OK)
+            var established = ConnectionEstablished(engineText);
+            var halted = false;
+            if (established)
+            {
+                try { halted = _client.Control.ExecutionStatus == DEBUG_STATUS.BREAK; } catch { }
+            }
+
+            if (waitHr == HRESULT.S_OK || (established && halted))
             {
                 _logger.LogInformation("Connected. Target at initial breakpoint.");
                 ReadBreakWithStatusAddress();
@@ -244,26 +312,27 @@ public sealed class DbgEngManager : IDisposable
                 // the target halted with a live client the coordinator didn't know about.
 
                 return $"Connected to kernel via {transport}. Target is at initial breakpoint. " +
+                       TargetBanner(engineText) +
                        "You can now use kd_execute to run WinDbg commands, or kd_continue to resume.";
             }
-            else if (WaitAbandoned(waitHr))
+
+            if (established && WaitAbandoned(waitHr))
             {
-                // Timeout — target is running but we're connected
-                _logger.LogInformation("Connected. Target is running (no initial break within timeout).");
+                // The link formed but no break arrived: the target is running.
+                _logger.LogInformation("Connected. Target is running (no initial break within the budget).");
                 _thread.PumpEnabled = true;
 
                 return $"Connected to kernel via {transport}. Target is running freely. " +
+                       TargetBanner(engineText) +
                        "Call kd_break to halt the target for inspection.";
             }
-            else
-            {
-                // Real failure
-                _client.TryEndSession(DEBUG_END.ACTIVE_TERMINATE);
-                _client = null;
-                throw new InvalidOperationException(
-                    $"WaitForEvent failed: {waitHr}. " + ErrorMessages.KdConnectFailed);
-            }
-        }, timeout, "kd_connect (attach and initial breakpoint)");
+
+            // The kernel never answered (or the wait failed outright): release the
+            // client so the engine thread is free for the next attempt.
+            _logger.LogWarning("kd_connect: no answer from the target (hr={Hr}); ending the session", waitHr);
+            try { _client.TryEndSession(DEBUG_END.ACTIVE_TERMINATE); } catch { }
+            DropClient();
+            throw new InvalidOperationException(NoAnswerMessage(transport, engineText, waitHr));
     }
 
     /// <summary>
@@ -346,7 +415,7 @@ public sealed class DbgEngManager : IDisposable
                 }
                 catch { }
 
-                _client = null;
+                DropClient();
                 _logger.LogInformation("Disconnected from kernel debugger.");
                 return new DetachResult(true, passedBackUnhandled
                     ? "Disconnected from kernel debugger. The target was resumed with its unhandled exception " +
@@ -1102,6 +1171,197 @@ public sealed class DbgEngManager : IDisposable
     //  HELPERS
     // ═══════════════════════════════════════════════════════════════
 
+    /// <summary>
+    /// Waits for the kernel to answer the attach. The engine's own handshake forms
+    /// a normal link in 3-6 s. A kernel restored from a snapshot ignored it and
+    /// answered only an explicit break-in, so one is sent at 15 s and 45 s, then
+    /// once a minute - and no more often than that: every break-in the kernel
+    /// cannot complete freezes the guest for its retry cycle (sending them every
+    /// 2 s left VMware Tools timing out and the serial handshake failing). The wait
+    /// has no deadline: neither SetInterrupt(EXIT) nor EndSession(END_REENTRANT)
+    /// releases a wait whose link never formed (both verified live), so the caller
+    /// returns PENDING and this keeps waiting until the kernel answers.
+    /// </summary>
+    private HRESULT WaitForKernelToAnswer(System.Text.StringBuilder engineText)
+    {
+        var secs = 0;
+        using var timer = new Timer(_ =>
+        {
+            secs++;
+            if (_client != null && (secs == 15 || secs == 45 || (secs > 45 && (secs - 45) % 60 == 0)))
+                RequestInterrupt();
+            // While nothing answers, log what the engine itself says every 10 s:
+            // it is the only witness of a connect that never completes.
+            if (secs % 10 == 0)
+            {
+                var text = _outputCapture.GetAndClear();
+                lock (engineText) engineText.Append(text);
+                var last = LastEngineLine(engineText);
+                lock (_pendingLock) _pendingEngineLine = last;
+                _logger.LogInformation("kd_connect still waiting for the kernel; engine output so far ends with: {Line}", last ?? "(nothing)");
+            }
+        }, null, 1000, 1000);
+
+        return _client!.Control.TryWaitForEvent(DEBUG_WAIT.DEFAULT, unchecked((int)0xFFFFFFFF));
+    }
+
+    private readonly object _pendingLock = new();
+    private string? _pendingEngineLine;
+
+    /// <summary>The engine's latest meaningful output line while a kd_connect is pending.</summary>
+    public string? PendingConnectEngineLine
+    {
+        get { lock (_pendingLock) return ConnectPendingSeconds == null ? null : _pendingEngineLine; }
+    }
+
+    internal static string? LastEngineLine(System.Text.StringBuilder sb)
+    {
+        string text;
+        lock (sb) text = sb.ToString();
+        foreach (var raw in text.Split('\n').Reverse())
+        {
+            var line = raw.Trim();
+            if (line.Length == 0 || line.StartsWith('*') || line.StartsWith('>') || line.StartsWith("----") ||
+                line.Contains("Repositor", StringComparison.OrdinalIgnoreCase) ||
+                line.Contains("Gallery", StringComparison.OrdinalIgnoreCase))
+                continue;
+            return line;
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// Forgets the current client after its session ended. Its callbacks are
+    /// unregistered first: the engine keeps delivering events to every client it
+    /// ever created, so a dropped client that still had our callbacks doubled every
+    /// event of the next session (one reboot counted as two).
+    /// </summary>
+    private void DropClient()
+    {
+        var client = _client;
+        _client = null;
+        if (client == null) return;
+        try { client.TrySetEventCallbacks(null); } catch { }
+        try { client.TrySetOutputCallbacks(null); } catch { }
+    }
+
+    /// <summary>The engine prints these only once the KD link has formed.</summary>
+    internal static bool ConnectionEstablished(string engineText) =>
+        engineText.Contains("Kernel Debugger connection established", StringComparison.OrdinalIgnoreCase) ||
+        engineText.Contains("Connected to Windows", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>The "Connected to Windows ... target at (...)" line, for the tool result.</summary>
+    internal static string TargetBanner(string engineText)
+    {
+        foreach (var raw in engineText.Split('\n'))
+        {
+            var line = raw.Trim();
+            if (line.StartsWith("Connected to Windows", StringComparison.OrdinalIgnoreCase))
+                return line + " ";
+        }
+        return "";
+    }
+
+    internal static string NoAnswerMessage(KdTransport transport, string engineText, HRESULT waitHr) =>
+        $"kd_connect failed: the engine's wait for the kernel ended with {DescribeHResult(waitHr)} before a connection " +
+        (ConnectionEstablished(engineText) ? "was usable" : "formed") +
+        ". The session was released; the engine is free and kd_connect can be retried. " + ErrorMessages.KdConnectFailed;
+
+    /// <summary>What kd_connect returns when its budget runs out with the attempt still waiting.</summary>
+    internal static string PendingMessage(KdTransport transport, int budgetSeconds) =>
+        $"kd_connect is PENDING: the kernel has not answered within {budgetSeconds}s ({transport}). The attempt stays " +
+        "active and completes on its own when the kernel answers: the next tool result then reports " +
+        "'KERNEL DEBUGGER CONNECTED' and get_system_state shows KD Connected True (the target is halted at its " +
+        "initial breakpoint: kd_continue). While it is pending, kernel tools report 'connect pending' and guest tools " +
+        "keep working. Usual reasons, most likely first: the guest is crashing or rebooting (it answers when the " +
+        "new kernel starts, typically 1-3 minutes); the VM was started or reset less than a minute ago (KDNET " +
+        "initialises in 30-60 s); the guest's debug transport, port, key or COM port does not match the server's " +
+        "settings (compare 'bcdedit /dbgsettings' in the guest with get_system_state's KD Config line); rarely, the " +
+        "engine lost sync with a target that did break in (the guest then looks frozen). A pending connect cannot be " +
+        "cancelled. If it is still pending after ~2 minutes and the guest is not rebooting, restart the MCP server: a " +
+        "fresh engine resynchronises within seconds when the settings are right, so if the fresh one also stays " +
+        "pending, the settings do not match.";
+
+    /// <summary>Win32-style HRESULTs (e.g. 0x800700E7, pipe busy) in words.</summary>
+    internal static string DescribeHResult(HRESULT hr)
+    {
+        var code = unchecked((int)hr);
+        string? text = null;
+        try { text = Marshal.GetExceptionForHR(code)?.Message; } catch { }
+        return string.IsNullOrWhiteSpace(text) ? $"0x{code:X8}" : $"0x{code:X8} ({text!.Trim()})";
+    }
+
+    internal (string ConnStr, KdTransport Transport) ResolveConnection(string? connectionString)
+    {
+        if (connectionString != null)
+            return (connectionString, connectionString.StartsWith("net:", StringComparison.OrdinalIgnoreCase)
+                ? KdTransport.KDNET : KdTransport.Serial);
+        if (_config.KernelDebug.Transport.Equals("kdnet", StringComparison.OrdinalIgnoreCase))
+            return ($"net:port={_config.KernelDebug.Kdnet.Port},key={_config.KernelDebug.Kdnet.Key}", KdTransport.KDNET);
+        if (_config.KernelDebug.Transport.Equals("serial", StringComparison.OrdinalIgnoreCase))
+            return ($"com:pipe,port={_config.KernelDebug.Serial.PipeName},resets=0,reconnect", KdTransport.Serial);
+        throw new InvalidOperationException(
+            $"Unknown kernel debug transport: '{_config.KernelDebug.Transport}'. Use 'kdnet' or 'serial'.");
+    }
+
+    /// <summary>The named pipe of a "com:pipe,port=..." connection string, or null.</summary>
+    internal static string? SerialPipeName(string connStr)
+    {
+        if (!connStr.StartsWith("com:", StringComparison.OrdinalIgnoreCase) ||
+            connStr.IndexOf("pipe", StringComparison.OrdinalIgnoreCase) < 0)
+            return null;
+        var m = Regex.Match(connStr, @"(?i)port=([^,]+)");
+        return m.Success ? m.Groups[1].Value.Trim() : null;
+    }
+
+    /// <summary>
+    /// Waits until the serial pipe can take a client. Returns null when it can, or
+    /// what is wrong in words.
+    /// </summary>
+    private string? WaitForSerialPipe(string pipe, int timeoutMs)
+    {
+        var deadline = Environment.TickCount64 + timeoutMs;
+        while (true)
+        {
+            if (NativeMethods.WaitNamedPipe(pipe, 1000))
+                return null;
+            var err = Marshal.GetLastWin32Error();
+            if (Environment.TickCount64 >= deadline)
+            {
+                return err == 2
+                    ? $"The serial pipe {pipe} does not exist. VMware creates it only while the VM is powered on and " +
+                      "its serial port is configured as that named pipe (serial0.fileType = \"pipe\", serial0.fileName). " +
+                      "Check the VM is running and the pipe name in the settings matches the .vmx file."
+                    : $"The serial pipe {pipe} stayed busy for {timeoutMs / 1000}s: another client holds it (WinDbg, kd, " +
+                      "or another MCP server instance attached to this VM). Close that debugger, then retry kd_connect. " +
+                      $"(Win32 error {err})";
+            }
+            if (err == 2)
+                Thread.Sleep(500); // WaitNamedPipe returns at once for a missing pipe
+        }
+    }
+
+    private void ReportLateConnect(bool connected, string message, KdTransport transport)
+    {
+        _logger.LogWarning("Pending kd_connect finished late: connected={Connected}: {Message}", connected, message);
+        try { LateConnectCompleted?.Invoke(connected, message, transport); }
+        catch (Exception ex) { _logger.LogWarning(ex, "LateConnectCompleted handler threw"); }
+    }
+
+    private sealed class ConnectAttempt(KdTransport transport)
+    {
+        public const int Waiting = 0, CallerGaveUp = 1, Done = 2;
+        public int State;
+        public volatile bool Started;
+        public string? Result;
+        public Exception? Error;
+        public KdTransport Transport { get; } = transport;
+    }
+
+    /// <summary>The KDNET key is a secret: never let it reach a log.</summary>
+    internal static string RedactConnectionString(string connStr) =>
+        System.Text.RegularExpressions.Regex.Replace(connStr, @"(?i)(key=)[^,\s]+", "$1<redacted>");
+
     private static string? FindDebuggerDirectory()
     {
         // Try common locations for Debugging Tools for Windows
@@ -1137,7 +1397,7 @@ public sealed class DbgEngManager : IDisposable
     public void ResetConnectionState()
     {
         _thread.PumpEnabled = false;
-        _client = null;
+        DropClient();
         _eventCallbacks.ClearEvents();
         _eventCallbacks.ClearRebootFlag();
         // _disposed intentionally NOT set — manager remains usable

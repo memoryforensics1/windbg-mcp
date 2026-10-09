@@ -224,6 +224,11 @@ public static class VmTools
                                "Frida and dbgsrv sessions (if any) are gone. The target is halted at its initial " +
                                "breakpoint: call kd_continue before any guest operation.";
                     }
+                    catch (KernelDebug.KdConnectPendingException pending)
+                    {
+                        return statusMsg + " Kernel debugger auto-reconnect: " + pending.Message +
+                               " Frida and dbgsrv sessions (if any) are gone.";
+                    }
                     catch (Exception ex)
                     {
                         return statusMsg + $" Auto-reconnect failed: {ex.Message} " +

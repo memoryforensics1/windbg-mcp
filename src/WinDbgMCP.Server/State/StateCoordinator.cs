@@ -46,6 +46,29 @@ public sealed class StateCoordinator
     public Func<bool>? IsEngineParked { get; set; }
     /// <summary>Describes the engine command still running past its tool timeout, or null when idle.</summary>
     public Func<string?>? GetEngineBusy { get; set; }
+    public Func<int?>? GetConnectPendingSeconds { get; set; }
+
+    // A kd_connect that returned PENDING finishes on the engine thread; its outcome
+    // is applied (and announced) at the next state refresh, under the tool lock.
+    private readonly System.Collections.Concurrent.ConcurrentQueue<(bool Connected, string Message, KdTransport Transport)> _lateConnects = new();
+
+    /// <summary>Called from the engine thread when a pending kd_connect finishes.</summary>
+    public void OnLateConnect(bool connected, string message, KdTransport transport) =>
+        _lateConnects.Enqueue((connected, message, transport));
+
+    private string NotConnectedMessage()
+    {
+        if (_state.KdConnectPendingSeconds is { } secs)
+            return $"Kernel debugger is not connected yet: a kd_connect has been waiting {secs}s for the kernel to " +
+                   "answer and completes on its own (the next tool result then reports KERNEL DEBUGGER CONNECTED). " +
+                   "Poll get_system_state; guest tools work meanwhile (unless the target broke in and froze). If it " +
+                   "is still pending after ~2 minutes and the guest is not rebooting, restart the MCP server (a fresh " +
+                   "engine resyncs within seconds; if it also stays pending, the debug settings do not match).";
+        if (_state.KdEngineBusyWith is { } busy)
+            return ErrorMessages.KdNotConnected + $" (Note: the engine thread is still busy with {busy}; " +
+                   "kd_connect will report that until it frees.)";
+        return ErrorMessages.KdNotConnected;
+    }
     public Func<int>? GetPendingEventCount { get; set; }
     public Func<int>? GetPendingInformationalEventCount { get; set; }
     public Func<int>? GetModuleEventsLast10s { get; set; }
@@ -287,6 +310,23 @@ public sealed class StateCoordinator
     /// </summary>
     public async Task RefreshStateAsync()
     {
+        // 0. A pending kd_connect that finished since the last call.
+        while (_lateConnects.TryDequeue(out var late))
+        {
+            if (late.Connected)
+            {
+                SetKdConnected(late.Transport);
+                _noDebuggeeAlerted = false;
+                _alerts.Add("KERNEL DEBUGGER CONNECTED: the pending kd_connect completed. " + late.Message +
+                            " The target is halted now, so guest tools are blocked until kd_continue.");
+            }
+            else
+            {
+                _alerts.Add("PENDING kd_connect FAILED: " + late.Message);
+            }
+        }
+        _state.KdConnectPendingSeconds = _state.KdConnected ? null : GetConnectPendingSeconds?.Invoke();
+
         // 1. DbgEng execution status — single COM call, ~microseconds
         if (_state.KdConnected && IsDbgEngConnected?.Invoke() == true)
         {
@@ -362,7 +402,7 @@ public sealed class StateCoordinator
         _state.PendingEventCount = GetPendingEventCount?.Invoke() ?? 0;
         _state.PendingInformationalEventCount = GetPendingInformationalEventCount?.Invoke() ?? 0;
         _state.KdModuleEventsLast10s = _state.KdConnected ? GetModuleEventsLast10s?.Invoke() ?? 0 : 0;
-        _state.KdEngineBusyWith = _state.KdConnected ? GetEngineBusy?.Invoke() : null;
+        _state.KdEngineBusyWith = GetEngineBusy?.Invoke();
 
         // 2.5 BSOD detection — check once when transitioning INTO break state.
         // Skipped if a tool already flagged the bugcheck. A failed check (e.g. the
@@ -694,7 +734,7 @@ public sealed class StateCoordinator
     private ToolResult? RequireKdConnected_TargetReachable()
     {
         if (!_state.KdConnected)
-            return ToolResult.Error(ErrorMessages.KdNotConnected);
+            return ToolResult.Error(NotConnectedMessage());
         return KdTargetUnreachable();
     }
 
@@ -718,6 +758,13 @@ public sealed class StateCoordinator
         var notRunning = VmNotRunning();
         if (notRunning != null)
             return notRunning;
+        if (!_state.KdConnected && _state.KdConnectPendingSeconds is { } pendingSecs)
+            return ToolResult.Error(
+                $"A kd_connect is already pending ({pendingSecs}s): it is still waiting for the kernel to answer and " +
+                "cannot be cancelled or repeated. It completes on its own (the next tool result then reports " +
+                "KERNEL DEBUGGER CONNECTED). Poll get_system_state. If it is still pending after ~2 minutes and the guest " +
+                "is not rebooting, restart the MCP server: a fresh engine resyncs within seconds; if it also stays " +
+                "pending, the debug settings do not match (compare 'bcdedit /dbgsettings' with the KD Config line).");
         if (_state.KdConnected)
         {
             // "Call kd_disconnect first" would send the model in a circle when the
@@ -734,14 +781,14 @@ public sealed class StateCoordinator
     private ToolResult? RequireKdConnected()
     {
         if (!_state.KdConnected)
-            return ToolResult.Error(ErrorMessages.KdNotConnected);
+            return ToolResult.Error(NotConnectedMessage());
         return null;
     }
 
     private ToolResult? RequireKdConnected_TargetBroken()
     {
         if (!_state.KdConnected)
-            return ToolResult.Error(ErrorMessages.KdNotConnected);
+            return ToolResult.Error(NotConnectedMessage());
 
         var unreachable = KdTargetUnreachable();
         if (unreachable != null)
@@ -762,7 +809,7 @@ public sealed class StateCoordinator
     private ToolResult? RequireKdConnected_TargetRunning()
     {
         if (!_state.KdConnected)
-            return ToolResult.Error(ErrorMessages.KdNotConnected);
+            return ToolResult.Error(NotConnectedMessage());
 
         var unreachable = KdTargetUnreachable();
         if (unreachable != null)
@@ -784,7 +831,7 @@ public sealed class StateCoordinator
     private ToolResult? RequireKdConnected_TargetBroken_CanResume()
     {
         if (!_state.KdConnected)
-            return ToolResult.Error(ErrorMessages.KdNotConnected);
+            return ToolResult.Error(NotConnectedMessage());
 
         var unreachable = KdTargetUnreachable();
         if (unreachable != null)

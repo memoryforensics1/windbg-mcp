@@ -1,6 +1,7 @@
 using System.ComponentModel;
 using System.Text;
 using ModelContextProtocol.Server;
+using WinDbgMCP.Server.Diagnostics;
 using WinDbgMCP.Server.State;
 
 namespace WinDbgMCP.Server.Tools;
@@ -14,6 +15,8 @@ public static class MetaTools
         "ALWAYS allowed — call this whenever you're unsure about the current state.")]
     public static Task<string> GetSystemState(
         StateCoordinator state,
+        WinDbgMCP.Server.Configuration.ServerConfig config,
+        WinDbgMCP.Server.KernelDebug.DbgEngManager dbgEng,
         CancellationToken ct = default)
     {
         return state.RunToolAsync("get_system_state", () =>
@@ -22,6 +25,14 @@ public static class MetaTools
 
             var sb = new StringBuilder();
             sb.AppendLine("=== SYSTEM STATE ===");
+            sb.AppendLine();
+
+            // Which code and settings answered: a server started before the checkout
+            // was updated keeps running the old code until it is restarted.
+            sb.AppendLine($"MCP Server:        {ServerInfo.BuildLine()}");
+            sb.AppendLine($"Settings File:     {ServerInfo.SettingsPath ?? "unknown"}");
+            sb.AppendLine($"KD Config:         {ServerInfo.TransportLine(config)}");
+            sb.AppendLine($"Server Log:        {ServerInfo.LogFilePath ?? "none (stderr only)"}");
             sb.AppendLine();
 
             // VM
@@ -35,6 +46,20 @@ public static class MetaTools
 
             // Kernel Debugger
             sb.AppendLine($"KD Connected:      {s.KdConnected}");
+            if (!s.KdConnected && s.KdConnectPendingSeconds is { } pendingSecs)
+            {
+                sb.AppendLine($"KD CONNECT PENDING: {pendingSecs}s - a kd_connect is waiting for the kernel to answer;");
+                sb.AppendLine("   it completes on its own (KERNEL DEBUGGER CONNECTED in the next result) and cannot be");
+                sb.AppendLine("   cancelled. Still pending after ~2 min with the guest not rebooting: restart the MCP server");
+                sb.AppendLine("   (a fresh engine resyncs in seconds; if it also stays pending, the settings do not match).");
+                if (dbgEng.PendingConnectEngineLine is { } engineLine)
+                    sb.AppendLine($"   Engine output so far ends with: {engineLine}");
+            }
+            else if (!s.KdConnected && s.KdEngineBusyWith != null)
+            {
+                sb.AppendLine($"ENGINE BUSY:       {s.KdEngineBusyWith}");
+                sb.AppendLine($"   {WinDbgMCP.Server.KernelDebug.EngineBusyException.Explain(s.KdEngineBusyWith)}");
+            }
             if (s.KdConnected)
             {
                 sb.AppendLine($"KD Transport:      {s.KdTransportType}");

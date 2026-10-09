@@ -18,6 +18,10 @@ public static class NativeMethods
 
     [DllImport(Kernel32, CharSet = CharSet.Unicode, SetLastError = true)]
     public static extern bool SetDllDirectory(string lpPathName);
+
+    /// <summary>True when an instance of the named pipe can take a client within the timeout.</summary>
+    [DllImport(Kernel32, CharSet = CharSet.Unicode, SetLastError = true, EntryPoint = "WaitNamedPipeW")]
+    public static extern bool WaitNamedPipe(string lpNamedPipeName, int nTimeOut);
 }
 
 /// <summary>
