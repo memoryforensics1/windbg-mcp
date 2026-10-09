@@ -19,10 +19,41 @@ public sealed class SystemState
     public string? KdBreakReason { get; set; }
     public bool KdWaitPending { get; set; }
     public int PendingEventCount { get; set; }
+    // Of PendingEventCount, how many are module/process/thread notifications
+    // (informational, never a reason the target stopped).
+    public int PendingInformationalEventCount { get; set; }
+    public int PendingImportantEventCount => Math.Max(0, PendingEventCount - PendingInformationalEventCount);
+
+    // Module load/unload events in the last 10 s. A burst (>= 5) means the kernel
+    // is booting or loading drivers in bulk, and break-ins are dropped meanwhile.
+    public int KdModuleEventsLast10s { get; set; }
+    public bool KdModuleFlood => KdModuleEventsLast10s >= 5;
 
     // BSOD detection
     public bool IsBugcheck { get; set; }
     public string? BugcheckCode { get; set; }
+    // The four bugcheck parameters from .bugcheck, e.g. "ffffffff`c0000005 00000000`00000000 ..." (null if unknown)
+    public string? BugcheckArgs { get; set; }
+
+    // Halted at a second-chance (unhandled) exception: the kernel has not entered
+    // KeBugCheckEx yet (so IsBugcheck is false) but the next resume bugchecks the OS.
+    public bool KdFatalExceptionPending { get; set; }
+
+    // A kd_execute that outlived its timeout is still running on the engine thread
+    // (e.g. "!analyze -v, running for 95 s"); every other kernel tool waits behind it.
+    public string? KdEngineBusyWith { get; set; }
+
+    /// <summary>Seconds a kd_connect has been waiting for the kernel to answer; null when none is.</summary>
+    public int? KdConnectPendingSeconds { get; set; }
+
+    // The engine thread is parked in a target-less wait that did not answer a probe
+    // (graceful restart while attached, or a reboot still in progress).
+    public bool KdEngineParked { get; set; }
+
+    // Target rebooted since the last kd_continue; engine reconnected at the initial breakpoint
+    public bool KdRebootDetected { get; set; }
+    // Reboots since kd_connect; debug events are tagged "reboot#N" with the generation they belong to
+    public int KdRebootGeneration { get; set; }
 
     // === Guest Exec Layer ===
     /// <summary>
@@ -62,18 +93,22 @@ public enum KdTransport
 }
 
 /// <summary>
-/// Maps directly to DEBUG_STATUS_* constants from dbgeng.h.
+/// Maps directly to DEBUG_STATUS_* constants from dbgeng.h (verified against
+/// the engine: NO_DEBUGGEE is 7, not 0).
 /// </summary>
 public enum DebugExecutionStatus
 {
-    NoDebuggee = 0,       // DEBUG_STATUS_NO_DEBUGGEE
+    NoChange = 0,         // DEBUG_STATUS_NO_CHANGE
     Go = 1,               // DEBUG_STATUS_GO
-    StepInto = 2,         // DEBUG_STATUS_STEP_INTO
-    StepOver = 3,         // DEBUG_STATUS_STEP_OVER
-    StepBranch = 4,       // DEBUG_STATUS_STEP_BRANCH
+    GoHandled = 2,        // DEBUG_STATUS_GO_HANDLED
+    GoNotHandled = 3,     // DEBUG_STATUS_GO_NOT_HANDLED
+    StepOver = 4,         // DEBUG_STATUS_STEP_OVER
+    StepInto = 5,         // DEBUG_STATUS_STEP_INTO
     Break = 6,            // DEBUG_STATUS_BREAK
-    GoHandled = 7,        // DEBUG_STATUS_GO_HANDLED
-    GoNotHandled = 8,     // DEBUG_STATUS_GO_NOT_HANDLED
+    NoDebuggee = 7,       // DEBUG_STATUS_NO_DEBUGGEE
+    StepBranch = 8,       // DEBUG_STATUS_STEP_BRANCH
+    IgnoreEvent = 9,      // DEBUG_STATUS_IGNORE_EVENT
+    RestartRequested = 10,// DEBUG_STATUS_RESTART_REQUESTED
     Uninitialized = -1    // Our own: DbgEng not loaded yet
 }
 

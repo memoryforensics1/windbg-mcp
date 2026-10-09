@@ -36,6 +36,38 @@ public static class ErrorMessages
         "You can inspect state with kd_execute (e.g., 'k', 'r', 'db addr'), " +
         "or resume execution (kd_continue).";
 
+    public static string TargetAlreadyHalted(string? reason) =>
+        $"Target is already halted ({reason ?? "reason not probed yet"}); there is nothing to break into. " +
+        "Inspect it with kd_execute (e.g. 'k', 'r', 'db addr') or resume it with kd_continue.";
+
+    public static string TargetHaltedAtFatalException(string? reason) =>
+        $"Target is already halted, at a FATAL second-chance exception ({reason ?? "unhandled exception"}); " +
+        "there is nothing to break into and kd_continue would NOT resume it but bugcheck the OS. " +
+        "Analyze now: kd_execute('!analyze -v', timeoutSeconds=300), kd_execute('k'), kd_execute('r'); " +
+        "or vm_snapshot_restore to revert.";
+
+    public const string TargetRebooting =
+        "The engine has no debuggee right now: the target is rebooting (after a crash) or restarted " +
+        "without re-attaching. Nothing can run on the kernel until it is back. Poll get_system_state: " +
+        "it shows TARGET REBOOTED at the initial breakpoint (then kd_continue); if it shows VMware Tools " +
+        "running but the kernel did not re-attach, kd_disconnect then kd_connect.";
+
+    public const string VmPausedKdAttached =
+        "VM is Paused: a paused kernel cannot answer the debugger, so this call would only time out and " +
+        "keep the engine busy. Call vm_resume first.";
+
+    public const string VmOffKdAttached =
+        "VM is Off: the kernel debug session is dead. Call kd_disconnect, then vm_start and kd_connect.";
+
+    public const string VmPowerUnknown =
+        "VM power state is Unknown: vmrun could not report it (VMware Workstation not responding, wrong " +
+        "VMX path, or vmrun timed out). Check VMware, then get_system_state.";
+
+    public const string GuestOpsDuringReboot =
+        "The kernel is rebooting (crash dump and restart) and the guest OS is not up, so guest tools " +
+        "cannot run. Poll get_system_state until VMware Tools reports Running (and the kernel, if it " +
+        "re-attached, is past its initial breakpoint).";
+
     public const string WaitPending =
         "A previous step or continue operation has a pending WaitForEvent. " +
         "Call kd_wait_for_event to check if it completed, or kd_break to interrupt it.";
@@ -50,7 +82,7 @@ public static class ErrorMessages
     public const string ToolsNotResponding =
         "VMware Tools is not responding inside the guest. Possible causes: " +
         "(1) VM is still booting — wait 10-30 seconds and retry. " +
-        "(2) Guest OS crashed — check vm_screenshot. " +
+        "(2) Guest OS crashed, or halted by the kernel debugger — check get_system_state (and vm_screenshot where available). " +
         "(3) VMware Tools not installed — cannot execute guest operations without it. " +
         "Call get_system_state for current status.";
 
@@ -72,26 +104,47 @@ public static class ErrorMessages
         "You must re-establish any debug sessions you need.";
 
     // === BSOD-Specific Errors ===
-    public static string BsodCannotResume(string? bugcheckCode) =>
-        $"BSOD — Bugcheck {bugcheckCode ?? "unknown"}. " +
-        "The OS has crashed and cannot be meaningfully resumed. " +
-        "Continuing will likely re-enter the bugcheck handler or hang. " +
-        "Options: " +
-        "(1) kd_execute('!analyze -v') to analyze the crash. " +
-        "(2) vm_snapshot_restore to revert to a clean state. " +
-        "(3) vm_stop(hard=true) then vm_start to reboot.";
+    public const string BsodRecoveryOptions =
+        "Options: (1) kd_execute('!analyze -v', timeoutSeconds=300) to analyze the crash (first-time symbol loading takes minutes). " +
+        "(2) kd_continue to let the crash run its course: the kernel writes the dump and " +
+        "reboots (some targets break in a second time first — then kd_wait_for_event shows " +
+        "another Bugcheck event and kd_continue again); kd_wait_for_event / get_system_state " +
+        "then show TARGET REBOOTED at the initial breakpoint, and a final kd_continue boots the OS. " +
+        "(3) vm_snapshot_restore to revert to a clean state. " +
+        "(4) vm_stop(hard=true) + vm_start if the target never comes back (auto-reboot disabled).";
+
+    /// <summary>
+    /// Halted at a second-chance exception. This is where a real driver crash stops
+    /// first (e.g. an access violation that becomes bugcheck 0x3B/0x7E/0x1E): the
+    /// kernel has not called KeBugCheckEx yet, so .bugcheck still reads zero, but the
+    /// OS is already lost. The model must learn that here, not after a timeout.
+    /// </summary>
+    public static string FatalExceptionPending(string? lastEvent) =>
+        $"FATAL EXCEPTION (second chance): {lastEvent ?? "unhandled exception"}. The kernel has no handler for " +
+        "it, so the OS is effectively crashed: guest operations will NOT work, and the next kd_continue passes " +
+        "the exception back (gn), which bugchecks the machine (then the usual BSOD sequence: dump, reboot, " +
+        "initial breakpoint, kd_continue). Analyze NOW while the faulting context is intact: " +
+        "kd_execute('!analyze -v', timeoutSeconds=300) names the bugcheck it will become and the faulting driver; kd_execute('k') " +
+        "shows the faulting stack; kd_execute('r') the registers. Or vm_snapshot_restore to revert.";
 
     public static string BsodGuestOpsUnavailable(string? bugcheckCode) =>
         $"BSOD DETECTED — Bugcheck {bugcheckCode ?? "unknown"}. " +
         "The guest OS has crashed. Guest operations will NOT work because " +
-        "the OS is dead (not just paused). " +
-        "Options: (1) kd_execute('!analyze -v') to analyze the crash, " +
-        "(2) vm_snapshot_restore to revert to a clean state, " +
-        "(3) vm_stop(hard=true) + vm_start to reboot.";
+        "the OS is dead (not just paused). " + BsodRecoveryOptions;
 
     public static string BsodCannotBreak(string? bugcheckCode) =>
-        $"BSOD — cannot resume execution, the OS has crashed " +
-        $"(Bugcheck {bugcheckCode ?? "unknown"}). " +
-        "Use kd_execute('!analyze -v') to investigate, then " +
-        "vm_snapshot_restore to recover.";
+        $"BSOD — the target is already halted in the bugcheck handler " +
+        $"(Bugcheck {bugcheckCode ?? "unknown"}); there is nothing to break into. " +
+        BsodRecoveryOptions;
+
+    public static string BsodContinueWarning(string? bugcheckCode) =>
+        $"WARNING: target was halted at a BSOD (Bugcheck {bugcheckCode ?? "unknown"}). " +
+        "Expected sequence now: the kernel runs bugcheck callbacks, writes the crash dump " +
+        "(typically 30-60 s) and reboots. Call kd_wait_for_event(90): it returns TARGET REBOOTED " +
+        "at the initial breakpoint, then kd_continue boots the OS (get_system_state shows the " +
+        "state at any point). Some targets break in a SECOND " +
+        "time before rebooting (another Bugcheck event, BSOD flagged again — that is normal, not a " +
+        "failed continue): just kd_continue once more. If nothing happens for ~2 minutes the VM has " +
+        "auto-reboot disabled and is halted for good: use vm_stop(hard=true) + vm_start, " +
+        "or vm_snapshot_restore.";
 }

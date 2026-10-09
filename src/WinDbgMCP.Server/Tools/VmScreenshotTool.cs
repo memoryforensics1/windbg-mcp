@@ -16,26 +16,26 @@ public static class VmScreenshotTool
     [McpServerTool(Name = "vm_screenshot"), Description(
         "Capture a screenshot of the VM display. Useful for checking guest OS state " +
         "(boot screen, BSOD, login screen, etc).")]
-    public static async Task<string> VmScreenshot(
+    public static Task<string> VmScreenshot(
         StateCoordinator state,
         VmwareManager vmware,
         [Description("Host path to save the screenshot PNG")] string outputPath = @"C:\MCP_Logs\screenshot.png",
         CancellationToken ct = default)
     {
-        var precheck = await state.ValidatePreconditionsAsync("vm_screenshot");
-        if (precheck != null) return precheck.ErrorMessage!;
-
-        try
+        return state.RunToolAsync("vm_screenshot", async () =>
         {
-            var result = await vmware.CaptureScreenAsync(outputPath, ct);
-            if (!result.Success)
-                return $"vm_screenshot failed: {result.Message}";
+            try
+            {
+                var result = await vmware.CaptureScreenAsync(outputPath, ct);
+                if (!result.Success)
+                    return $"vm_screenshot failed: {result.Message}";
 
-            return result.Message;
-        }
-        catch (TimeoutException)
-        {
-            return ErrorMessages.OperationTimedOut("vm_screenshot", 10);
-        }
+                return result.Message;
+            }
+            catch (TimeoutException)
+            {
+                return ErrorMessages.OperationTimedOut("vm_screenshot", 10);
+            }
+        });
     }
 }

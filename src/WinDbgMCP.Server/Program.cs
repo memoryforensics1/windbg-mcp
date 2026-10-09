@@ -4,8 +4,10 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using ModelContextProtocol.Server;
 using WinDbgMCP.Server.Configuration;
+using WinDbgMCP.Server.Diagnostics;
 using WinDbgMCP.Server.Guest;
 using WinDbgMCP.Server.KernelDebug;
+using WinDbgMCP.Server.Notifications;
 using WinDbgMCP.Server.State;
 using WinDbgMCP.Server.Tools;
 using WinDbgMCP.Server.UserModeDebug;
@@ -21,11 +23,28 @@ builder.Configuration.AddJsonFile(Path.Combine(exeDir, "appsettings.json"), opti
 builder.Logging.AddConsole(options =>
 {
     options.LogToStandardErrorThreshold = LogLevel.Trace;
+    // Debug-event logging runs inside DbgEng callbacks; never let a full
+    // stderr queue block the engine thread if the client stops draining it.
+    options.QueueFullMode = Microsoft.Extensions.Logging.Console.ConsoleLoggerQueueFullMode.DropWrite;
 });
 
 // Bind configuration
 var config = new ServerConfig();
 builder.Configuration.Bind(config);
+ServerInfo.SettingsPath = Path.Combine(exeDir, "appsettings.json");
+
+// Also log to a file: stderr is not kept by every MCP client, and the log is the
+// first thing needed after a bad run. Logging:File:Directory overrides the default.
+var logDir = builder.Configuration["Logging:File:Directory"] is { Length: > 0 } configuredDir
+    ? Environment.ExpandEnvironmentVariables(configuredDir)
+    : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "WinDbgMCP", "logs");
+var fileLogger = FileLoggerProvider.TryCreate(logDir,
+    new[] { config.Vm.VmPassword, config.Vm.GuestPassword, config.KernelDebug.Kdnet.Key }, LogLevel.Trace);
+if (fileLogger != null)
+{
+    builder.Logging.AddProvider(fileLogger);
+    ServerInfo.LogFilePath = fileLogger.FilePath;
+}
 
 // Register services as singletons (single MCP server process, single VM)
 builder.Services.AddSingleton(config);
@@ -38,6 +57,9 @@ builder.Services.AddSingleton<DbgEngManager>();
 
 // Guest execution manager
 builder.Services.AddSingleton<GuestExecManager>();
+
+// Push important debug events to the MCP client (Notifications.PushDebugEvents)
+builder.Services.AddHostedService<McpEventNotifier>();
 
 // User-mode debug managers
 builder.Services.AddSingleton<FridaManager>();
@@ -61,8 +83,20 @@ builder.Services.AddSingleton<StateCoordinator>(sp =>
 
     // Wire up KD state delegates to DbgEngManager
     coordinator.IsDbgEngConnected = () => dbgEng.IsConnected;
+    coordinator.IsEngineParked = () => dbgEng.EngineWedged;
+    coordinator.GetEngineBusy = () => dbgEng.BusyDescription;
+    coordinator.GetConnectPendingSeconds = () => dbgEng.ConnectPendingSeconds;
+    dbgEng.LateConnectCompleted = coordinator.OnLateConnect;
     coordinator.GetDbgEngExecutionStatus = () => dbgEng.GetExecutionStatus();
     coordinator.GetPendingEventCount = () => dbgEng.PendingEventCount;
+    coordinator.GetPendingInformationalEventCount = () => dbgEng.PendingInformationalEventCount;
+    coordinator.GetModuleEventsLast10s = () => dbgEng.ModuleEventsInLast10s;
+    coordinator.GetRebootGeneration = () => dbgEng.RebootGeneration;
+    coordinator.DetectBugcheckAsync = () => dbgEng.DetectBugcheckAsync();
+    coordinator.IsSecondChancePending = () => dbgEng.SecondChancePending;
+    coordinator.IsRebootDetected = () => dbgEng.RebootDetected;
+    coordinator.DrainDebugEvents = () => dbgEng.DrainEvents();
+    coordinator.GetRecentDebugEvents = () => dbgEng.RecentEvents;
 
     // Wire up UMD state delegates
     coordinator.IsFridaAttached = () => frida.IsAttached;
@@ -103,11 +137,21 @@ builder.Services
             Version = "1.0.0-alpha"
         };
         options.ServerInstructions = BuildServerInstructions(config);
+        // McpEventNotifier sends notifications/message; the spec requires the
+        // capability to be declared. Mutate rather than replace — the SDK fills Tools.
+        options.Capabilities ??= new();
+        options.Capabilities.Logging = new();
     })
     .WithStdioServerTransport()
     .WithTools(toolTypes);
 
-await builder.Build().RunAsync();
+var app = builder.Build();
+var startupLog = app.Services.GetRequiredService<ILoggerFactory>().CreateLogger("WinDbgMCP.Server.Startup");
+startupLog.LogInformation("Starting {Build}", ServerInfo.BuildLine());
+startupLog.LogInformation("Binary: {Path}", ServerInfo.AssemblyPath);
+startupLog.LogInformation("Settings: {Path}; kernel debug transport: {Transport}", ServerInfo.SettingsPath, ServerInfo.TransportLine(config));
+startupLog.LogInformation("Log file: {Path}", ServerInfo.LogFilePath ?? "(none: stderr only)");
+await app.RunAsync();
 
 static string BuildServerInstructions(ServerConfig config)
 {
@@ -173,7 +217,7 @@ static string BuildServerInstructions(ServerConfig config)
     sb.AppendLine();
 
     sb.AppendLine("### Kernel Debug Tools (7) — requires `kd_connect` first");
-    sb.AppendLine("- `kd_connect` — Attach to kernel via KDNET. VM must have debug boot enabled. Target breaks on connect.");
+    sb.AppendLine("- `kd_connect` — Attach to the kernel via KDNET or serial (get_system_state shows 'KD Config'). VM must have debug boot enabled. Target breaks on connect. A connect the kernel does not answer within the budget comes back PENDING and completes on its own; it cannot be cancelled.");
     sb.AppendLine("- `kd_disconnect` — Detach. Resumes target so VM keeps running.");
     sb.AppendLine("- `kd_break` — Halt running target (Ctrl+Break). After breaking, use kd_execute.");
     sb.AppendLine("- `kd_continue` — Resume target (go). Returns immediately. Guest ops require target running.");
@@ -204,15 +248,23 @@ static string BuildServerInstructions(ServerConfig config)
     // === Critical rules ===
     sb.AppendLine("## Critical Rules");
     sb.AppendLine();
-    sb.AppendLine("1. **BREAK vs RUNNING**: Kernel debug commands (kd_execute, kd_step) require the target to be at a BREAK. Guest operations (guest_run_command, guest_transfer_*) require the target to be RUNNING. If the kernel debugger froze the VM, call `kd_continue` before guest ops.");
+    sb.AppendLine("1. **BREAK vs RUNNING**: Kernel debug commands (kd_execute, kd_step) require the target to be at a BREAK. Guest operations (guest_run_command, guest_transfer_*) require the target to be RUNNING. If the kernel debugger froze the VM at a breakpoint or break-in, call `kd_continue` before guest ops. Guest tools do not need a logged-in user. A paused VM (vm_pause) cannot answer the debugger: vm_resume before any kd_* call.");
+    sb.AppendLine();
+    sb.AppendLine("1b. **Halts are not all the same** — read get_system_state's Break Reason, Is Bugcheck and Fatal Exception lines: a breakpoint/break-in resumes with kd_continue; a FATAL EXCEPTION (second-chance: the kernel has no handler, .bugcheck still reads zero) is a crash in progress — analyze now, kd_continue bugchecks the OS; a BSOD DETECTED halt is already in the bugcheck handler — kd_continue goes to the dump and reboot.");
+    sb.AppendLine();
+    sb.AppendLine("1c. **One engine thread**: a kd_execute that outlives its timeout keeps running (it cannot be cancelled) and every other kernel tool reports ENGINE BUSY until it finishes — wait and poll get_system_state, do not re-issue it. Symbol-loading commands (!analyze -v, first lm/k/.reload) take minutes the first time: pass timeoutSeconds=300.");
+    sb.AppendLine();
+    sb.AppendLine("1d. **Boot is noisy, not broken**: after any reboot the booting kernel emits hundreds of informational module events (counted separately from important events) and drops break-ins for tens of seconds; get_system_state shows 'Kernel Activity' meanwhile, kd_break may need up to 60 s, and guest tools work once VMware Tools reports Running. Events carry a reboot#N tag telling which kernel they belong to.");
     sb.AppendLine();
     sb.AppendLine("2. **Blocked commands in kd_execute**: `g`, `gh`, `gn`, `gu`, `p`, `t`, `pa`, `ta`, `wt`, `tt`, `pc`, `tc` are BLOCKED because they change execution state. Use `kd_continue` (go) or `kd_step` (step) instead.");
     sb.AppendLine();
     sb.AppendLine("3. **kd_wait_for_event is safe**: It ALWAYS returns within the timeout. Use it after kd_continue + breakpoint to wait for the breakpoint to trigger.");
     sb.AppendLine();
-    sb.AppendLine("4. **After BSOD**: get_system_state will show IsBugcheck=True. You can still debug — use kd_execute('!analyze -v'), kd_execute('k'), kd_execute('r'), etc. to investigate the crash. Guest operations won't work while at the BSOD. To recover: (a) kd_continue — the VM will reboot on its own, wait for it to come back up and guest ops work again, OR (b) vm_snapshot_restore to revert to a clean state. Choose whichever fits your goal.");
+    sb.AppendLine("4. **After BSOD**: get_system_state will show BSOD DETECTED with the bugcheck code and arguments. You can still debug — use kd_execute('!analyze -v', timeoutSeconds=300), kd_execute('k'), kd_execute('r'), etc. to investigate the crash. Guest operations won't work while at the BSOD. To recover: (a) kd_continue — the kernel writes the dump and reboots (some targets break in a second time first; that is expected — kd_continue again); kd_wait_for_event(120) / get_system_state then show TARGET REBOOTED at the initial breakpoint, and one more kd_continue boots the OS; OR (b) vm_snapshot_restore to revert to a clean state; OR (c) vm_stop(hard=true) + vm_start if the VM never reboots on its own. Choose whichever fits your goal.");
     sb.AppendLine();
-    sb.AppendLine("5. **Snapshot restore resets everything**: All debug sessions (KD, Frida, dbgsrv) are destroyed. Reconnect after restoring.");
+    sb.AppendLine("5. **Snapshot restore resets everything**: Frida and dbgsrv sessions are destroyed and must be re-established. The kernel debugger, if it was connected, is detached before the restore and reconnected afterwards automatically (the result says whether that succeeded); the target is then halted at its initial breakpoint — kd_continue before guest ops.");
+    sb.AppendLine();
+    sb.AppendLine("5b. **Restarting the guest on purpose** (guest_run_command('shutdown /r'), vm_stop/vm_start): call kd_disconnect FIRST, then restart, then kd_connect once the OS is up. After a graceful restart the kernel does not re-attach to an existing debugger session; only a crash (BSOD) reboot reconnects automatically at the initial breakpoint. If get_system_state ever reports the kernel did not re-attach, kd_disconnect then kd_connect.");
     sb.AppendLine();
     sb.AppendLine("6. **get_system_state first**: When unsure about the current state, call get_system_state. It's always allowed and tells you exactly what's available.");
     sb.AppendLine();
@@ -233,7 +285,7 @@ static string BuildServerInstructions(ServerConfig config)
     sb.AppendLine("guest_run_command('ipconfig /all') — runs in guest, returns stdout/stderr");
     sb.AppendLine();
     sb.AppendLine("**Crash analysis:**");
-    sb.AppendLine("kd_connect -> kd_execute('!analyze -v') -> kd_execute('k') -> kd_execute('r') -> kd_disconnect");
+    sb.AppendLine("kd_connect -> kd_execute('!analyze -v', timeoutSeconds=300) -> kd_execute('k') -> kd_execute('r') -> kd_disconnect");
     sb.AppendLine();
     sb.AppendLine("**Record with TTD:**");
     sb.AppendLine("umd_ttd(action='record_launch', target='C:\\path\\to\\app.exe') -> [use the app] -> umd_ttd(action='stop') -> umd_ttd(action='retrieve', target='trace.run', outputPath='C:\\host\\trace.run')");

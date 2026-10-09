@@ -11,17 +11,21 @@ public sealed class GuestCommandResult
     public string Stderr { get; }
     public string? ErrorMessage { get; }
 
-    private GuestCommandResult(bool success, int exitCode, string stdout, string stderr, string? error = null)
+    /// <summary>Set when the command ran but part of its result is unknown.</summary>
+    public string? Warning { get; }
+
+    private GuestCommandResult(bool success, int exitCode, string stdout, string stderr, string? error = null, string? warning = null)
     {
         Success = success;
         ExitCode = exitCode;
         Stdout = stdout;
         Stderr = stderr;
         ErrorMessage = error;
+        Warning = warning;
     }
 
-    public static GuestCommandResult Ok(int exitCode, string stdout, string stderr)
-        => new(true, exitCode, stdout, stderr);
+    public static GuestCommandResult Ok(int exitCode, string stdout, string stderr, string? warning = null)
+        => new(true, exitCode, stdout, stderr, warning: warning);
 
     public static GuestCommandResult Failed(string error)
         => new(false, -1, "", "", error);
@@ -36,6 +40,8 @@ public sealed class GuestCommandResult
             result += $"\n--- stdout ---\n{Stdout}";
         if (!string.IsNullOrWhiteSpace(Stderr))
             result += $"\n--- stderr ---\n{Stderr}";
+        if (!string.IsNullOrWhiteSpace(Warning))
+            result += $"\n--- WARNING ---\n{Warning}";
         return result;
     }
 }

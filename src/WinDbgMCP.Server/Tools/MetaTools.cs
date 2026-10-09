@@ -1,6 +1,7 @@
 using System.ComponentModel;
 using System.Text;
 using ModelContextProtocol.Server;
+using WinDbgMCP.Server.Diagnostics;
 using WinDbgMCP.Server.State;
 
 namespace WinDbgMCP.Server.Tools;
@@ -12,77 +13,173 @@ public static class MetaTools
         "Returns the complete state of the system: VM power, VMware Tools, kernel debugger, " +
         "guest operations availability, and user-mode debug sessions. " +
         "ALWAYS allowed — call this whenever you're unsure about the current state.")]
-    public static async Task<string> GetSystemState(
+    public static Task<string> GetSystemState(
         StateCoordinator state,
+        WinDbgMCP.Server.Configuration.ServerConfig config,
+        WinDbgMCP.Server.KernelDebug.DbgEngManager dbgEng,
         CancellationToken ct = default)
     {
-        await state.RefreshStateAsync();
-        var s = state.State;
-
-        var sb = new StringBuilder();
-        sb.AppendLine("=== SYSTEM STATE ===");
-        sb.AppendLine();
-
-        // VM
-        sb.AppendLine($"VM Power:          {s.VmPower}");
-        sb.AppendLine($"VMware Tools:      {s.VmTools}");
-        sb.AppendLine($"VM IP Address:     {s.VmIpAddress ?? "unknown"}");
-        sb.AppendLine();
-
-        // Kernel Debugger
-        sb.AppendLine($"KD Connected:      {s.KdConnected}");
-        if (s.KdConnected)
+        return state.RunToolAsync("get_system_state", () =>
         {
-            sb.AppendLine($"KD Transport:      {s.KdTransportType}");
-            sb.AppendLine($"Execution Status:  {s.KdExecStatus}");
+            var s = state.State;
 
-            if (s.KdExecStatus == DebugExecutionStatus.Break)
+            var sb = new StringBuilder();
+            sb.AppendLine("=== SYSTEM STATE ===");
+            sb.AppendLine();
+
+            // Which code and settings answered: a server started before the checkout
+            // was updated keeps running the old code until it is restarted.
+            sb.AppendLine($"MCP Server:        {ServerInfo.BuildLine()}");
+            sb.AppendLine($"Settings File:     {ServerInfo.SettingsPath ?? "unknown"}");
+            sb.AppendLine($"KD Config:         {ServerInfo.TransportLine(config)}");
+            sb.AppendLine($"Server Log:        {ServerInfo.LogFilePath ?? "none (stderr only)"}");
+            sb.AppendLine();
+
+            // VM
+            sb.AppendLine($"VM Power:          {s.VmPower}");
+            sb.AppendLine($"VMware Tools:      {s.VmTools}" +
+                          (s.KdConnected && s.KdExecStatus == DebugExecutionStatus.Break
+                              ? " (last known value; not probed while the target is halted)"
+                              : ""));
+            sb.AppendLine($"VM IP Address:     {s.VmIpAddress ?? "unknown"}");
+            sb.AppendLine();
+
+            // Kernel Debugger
+            sb.AppendLine($"KD Connected:      {s.KdConnected}");
+            if (!s.KdConnected && s.KdConnectPendingSeconds is { } pendingSecs)
             {
-                sb.AppendLine($"Break Reason:      {s.KdBreakReason ?? "unknown"}");
-
-                if (s.IsBugcheck)
+                sb.AppendLine($"KD CONNECT PENDING: {pendingSecs}s - a kd_connect is waiting for the kernel to answer;");
+                sb.AppendLine("   it completes on its own (KERNEL DEBUGGER CONNECTED in the next result) and cannot be");
+                sb.AppendLine("   cancelled. Still pending after ~2 min with the guest not rebooting: restart the MCP server");
+                sb.AppendLine("   (a fresh engine resyncs in seconds; if it also stays pending, the settings do not match).");
+                if (dbgEng.PendingConnectEngineLine is { } engineLine)
+                    sb.AppendLine($"   Engine output so far ends with: {engineLine}");
+            }
+            else if (!s.KdConnected && s.KdEngineBusyWith != null)
+            {
+                sb.AppendLine($"ENGINE BUSY:       {s.KdEngineBusyWith}");
+                sb.AppendLine($"   {WinDbgMCP.Server.KernelDebug.EngineBusyException.Explain(s.KdEngineBusyWith)}");
+            }
+            if (s.KdConnected)
+            {
+                sb.AppendLine($"KD Transport:      {s.KdTransportType}");
+                sb.AppendLine($"Execution Status:  {s.KdExecStatus}");
+                sb.AppendLine(s.KdRebootGeneration == 0
+                    ? "Reboot Generation: 0 (the kernel has not rebooted since kd_connect)"
+                    : $"Reboot Generation: {s.KdRebootGeneration} (the kernel rebooted {s.KdRebootGeneration} time(s) since kd_connect; " +
+                      $"events tagged reboot#{s.KdRebootGeneration} belong to the current kernel, lower or untagged ones to an earlier one)");
+                if (s.KdModuleFlood && s.KdExecStatus == DebugExecutionStatus.Break)
                 {
-                    sb.AppendLine($"BSOD DETECTED:     {s.BugcheckCode}");
-                    sb.AppendLine($"   The OS has CRASHED. Guest ops will NOT work.");
-                    sb.AppendLine($"   Run kd_execute('!analyze -v') or vm_snapshot_restore.");
+                    sb.AppendLine($"Kernel Activity:   {s.KdModuleEventsLast10s} module events in the last 10 s (the debugger enumerated the loaded modules " +
+                                  "at this halt; informational, not a stop reason).");
+                }
+                else if (s.KdModuleFlood)
+                {
+                    sb.AppendLine($"Kernel Activity:   booting / loading drivers in bulk ({s.KdModuleEventsLast10s} module events in the last 10 s).");
+                    sb.AppendLine($"   Break-ins are dropped while this lasts, so kd_break and kd_wait_for_event may time out: wait 30-60 s and retry.");
+                    sb.AppendLine($"   These are informational events, not a stop; guest tools work once VMware Tools reports running.");
+                }
+
+                if (s.KdRebootDetected)
+                {
+                    sb.AppendLine($"TARGET REBOOTED:   The kernel restarted since the last kd_continue.");
+                    sb.AppendLine($"   Previous state (and any earlier BSOD) is gone.");
+                    if (s.KdExecStatus == DebugExecutionStatus.Break)
+                        sb.AppendLine($"   The debugger reconnected at the initial breakpoint; call kd_continue to let the OS finish booting.");
+                    else if (s.VmTools == VmToolsState.Running)
+                    {
+                        sb.AppendLine($"   The OS has booted (VMware Tools is up) but the kernel did NOT re-attach to this debugger");
+                        sb.AppendLine($"   session (this is what a graceful restart does). Call kd_disconnect then kd_connect; if kd_connect");
+                        sb.AppendLine($"   reports the engine is parked, kernel-debug tools need an MCP server restart (guest/VM tools keep working).");
+                        sb.AppendLine($"   Next time call kd_disconnect BEFORE restarting the guest (guest_run_command does this for 'shutdown /r').");
+                    }
+                    else
+                    {
+                        sb.AppendLine($"   The debugger is waiting for the target to come back; poll get_system_state.");
+                        sb.AppendLine($"   If it never does (auto-reboot off), kd_disconnect then vm_stop(hard=true) + vm_start.");
+                    }
+                }
+
+                if (s.KdExecStatus == DebugExecutionStatus.Break)
+                {
+                    sb.AppendLine($"Break Reason:      {s.KdBreakReason ?? (s.KdEngineBusyWith != null ? "not probed yet (engine busy)" : "not probed yet")}");
+
+                    sb.AppendLine($"Is Bugcheck:       {s.IsBugcheck}");
+                    sb.AppendLine(s.KdFatalExceptionPending
+                        ? "Fatal Exception:   True (second-chance exception pending; the next kd_continue bugchecks the OS)"
+                        : "Fatal Exception:   False");
+                    if (s.IsBugcheck)
+                    {
+                        sb.AppendLine($"BSOD DETECTED:     {s.BugcheckCode}" + (s.BugcheckArgs != null ? $"  arguments: {s.BugcheckArgs}" : ""));
+                        sb.AppendLine($"   The OS has CRASHED. Guest ops will NOT work.");
+                        sb.AppendLine($"   {ErrorMessages.BsodRecoveryOptions}");
+                    }
+                    else if (s.KdFatalExceptionPending)
+                    {
+                        sb.AppendLine($"FATAL EXCEPTION:   {s.KdBreakReason ?? "unhandled exception (second chance)"}");
+                        sb.AppendLine($"   {ErrorMessages.FatalExceptionPending(s.KdBreakReason)}");
+                    }
+                }
+
+                sb.AppendLine($"Pending Events:    {s.PendingImportantEventCount} important (stop/session events), " +
+                              $"{s.PendingInformationalEventCount} informational (module/process/thread notifications; never a reason the target stopped)");
+                if (s.KdEngineParked)
+                {
+                    sb.AppendLine($"ENGINE PARKED:     the engine thread is waiting for a target that has not (re-)attached.");
+                    sb.AppendLine($"   {WinDbgMCP.Server.KernelDebug.DbgEngManager.EngineWedgedMessage}");
+                }
+                if (s.KdEngineBusyWith != null)
+                {
+                    sb.AppendLine($"ENGINE BUSY:       {s.KdEngineBusyWith}");
+                    sb.AppendLine($"   An operation that outlived its tool timeout still occupies the single debugger thread;");
+                    sb.AppendLine($"   every kernel tool waits behind it (and times out) until it finishes.");
+                    sb.AppendLine($"   {WinDbgMCP.Server.KernelDebug.EngineBusyException.Explain(s.KdEngineBusyWith)}");
+                    sb.AppendLine($"   Wait and poll get_system_state; do not re-issue the same command.");
                 }
             }
 
-            sb.AppendLine($"Pending Events:    {s.PendingEventCount}");
-            sb.AppendLine($"Wait Pending:      {s.KdWaitPending}");
-        }
-        sb.AppendLine();
-
-        // Guest operations
-        sb.AppendLine($"Guest Ops Available: {s.GuestOpsAvailable}");
-        if (!s.GuestOpsAvailable)
-        {
-            if (s.VmPower != VmPowerState.Running)
-                sb.AppendLine($"   -> VM is {s.VmPower}");
-            else if (s.KdConnected && s.KdExecStatus == DebugExecutionStatus.Break)
+            var recent = state.GetRecentDebugEvents?.Invoke() ?? new();
+            if (recent.Count > 0)
             {
-                if (s.IsBugcheck)
-                    sb.AppendLine($"   -> BSOD: OS has crashed");
-                else
-                    sb.AppendLine($"   -> Kernel debugger has frozen the VM (call kd_continue)");
+                sb.AppendLine($"Recent Debug Events (last {recent.Count} important ones, oldest first; module/process/thread events omitted; may include those in the banner above):");
+                foreach (var evt in recent)
+                    sb.AppendLine($"   {evt}");
             }
-            else if (s.VmTools != VmToolsState.Running)
-                sb.AppendLine($"   -> VMware Tools: {s.VmTools}");
-        }
-        sb.AppendLine();
+            sb.AppendLine();
 
-        // User-mode debug
-        if (s.FridaState != null)
-            sb.AppendLine($"Frida:             {s.FridaState}");
-        if (s.DbgsrvState != null)
-            sb.AppendLine($"dbgsrv:            {s.DbgsrvState}");
-        if (s.UserDebugSessions.Count > 0)
-        {
-            sb.AppendLine("Active Debug Sessions:");
-            foreach (var session in s.UserDebugSessions)
-                sb.AppendLine($"   - [{session.Type}] PID {session.Pid} ({session.ProcessName})");
-        }
+            // Guest operations
+            sb.AppendLine($"Guest Ops Available: {s.GuestOpsAvailable}");
+            if (!s.GuestOpsAvailable)
+            {
+                if (s.VmPower != VmPowerState.Running)
+                    sb.AppendLine($"   -> VM is {s.VmPower}");
+                else if (s.KdConnected && s.KdExecStatus == DebugExecutionStatus.Break)
+                {
+                    if (s.IsBugcheck)
+                        sb.AppendLine($"   -> BSOD: OS has crashed");
+                    else if (s.KdFatalExceptionPending)
+                        sb.AppendLine($"   -> Fatal exception: the OS is crashed; kd_continue would bugcheck it, not resume it");
+                    else
+                        sb.AppendLine($"   -> Kernel debugger has frozen the VM (call kd_continue)");
+                }
+                else if (s.VmTools != VmToolsState.Running)
+                    sb.AppendLine($"   -> VMware Tools: {s.VmTools}");
+            }
+            sb.AppendLine();
 
-        return sb.ToString();
+            // User-mode debug
+            if (s.FridaState != null)
+                sb.AppendLine($"Frida:             {s.FridaState}");
+            if (s.DbgsrvState != null)
+                sb.AppendLine($"dbgsrv:            {s.DbgsrvState}");
+            if (s.UserDebugSessions.Count > 0)
+            {
+                sb.AppendLine("Active Debug Sessions:");
+                foreach (var session in s.UserDebugSessions)
+                    sb.AppendLine($"   - [{session.Type}] PID {session.Pid} ({session.ProcessName})");
+            }
+
+            return Task.FromResult(sb.ToString());
+        });
     }
 }

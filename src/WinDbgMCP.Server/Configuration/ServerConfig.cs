@@ -11,6 +11,18 @@ public sealed class ServerConfig
     public GuestConfig Guest { get; set; } = new();
     public SecurityConfig Security { get; set; } = new();
     public TimeoutConfig Timeouts { get; set; } = new();
+    public NotificationsConfig Notifications { get; set; } = new();
+}
+
+public sealed class NotificationsConfig
+{
+    /// <summary>
+    /// Push important debug events (BSOD, breakpoint, break-in, reboot, lost session)
+    /// to the MCP client as notifications/message as they happen. In current clients
+    /// this reaches the client's log, not the model — the model learns about events
+    /// from the banner on its next tool result regardless of this setting.
+    /// </summary>
+    public bool PushDebugEvents { get; set; } = true;
 }
 
 public sealed class VmConfig

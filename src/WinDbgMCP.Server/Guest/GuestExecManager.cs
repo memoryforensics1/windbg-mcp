@@ -68,7 +68,7 @@ public sealed class GuestExecManager
             var copyBat = await _vmware.CopyFileToGuestAsync(hostBat, guestBat, ct);
             if (!copyBat.Success)
                 return GuestCommandResult.Failed(
-                    $"Failed to copy command script to guest: {copyBat.Stderr.Trim()}");
+                    $"Failed to copy command script to guest: {Reason(copyBat)}");
 
             // Execute the batch file in the guest
             var execResult = await _vmware.RunProgramInGuestAsync(
@@ -77,21 +77,42 @@ public sealed class GuestExecManager
                 timeout: timeout,
                 ct: ct);
 
-            var exitCode = execResult.ExitCode;
+            // vmrun exits non-zero both when the guest program did (it then prints
+            // "Guest program exited with non-zero exit code: N") and when vmrun
+            // itself failed (e.g. "Error: VMware Tools are not running in the guest").
+            // Only the first is a command result; the second means it never ran.
+            int exitCode;
+            if (execResult.Success)
+                exitCode = 0;
+            else if (TryParseGuestExitCode(execResult, out var guestExit))
+                exitCode = guestExit;
+            else
+            {
+                SafeDeleteFile(hostBat);
+                return GuestCommandResult.Failed(
+                    $"The command could not be run in the guest: {Reason(execResult)}. " +
+                    "If VMware Tools is restarting or the guest is busy (e.g. right after boot, a resume or a " +
+                    "debugger detach), wait 10-30 s and retry; get_system_state shows whether guest operations are available.");
+            }
 
-            // Copy stdout/stderr files from guest to host
+            // Copy stdout/stderr files from guest to host. A failed copy is reported:
+            // an empty result must mean "no output", never "output lost".
             string stdout = "";
             string stderr = "";
+            var lost = new List<string>();
 
             try
             {
                 var copyOut = await _vmware.CopyFileFromGuestAsync(guestStdout, hostStdout, ct);
                 if (copyOut.Success && File.Exists(hostStdout))
                     stdout = (await File.ReadAllTextAsync(hostStdout, ct)).Trim();
+                else
+                    lost.Add($"stdout ({Reason(copyOut)})");
             }
             catch (Exception ex)
             {
                 _logger.LogDebug(ex, "Failed to retrieve stdout from guest");
+                lost.Add($"stdout ({ex.GetType().Name}: {ex.Message})");
             }
 
             try
@@ -99,11 +120,19 @@ public sealed class GuestExecManager
                 var copyErr = await _vmware.CopyFileFromGuestAsync(guestStderr, hostStderr, ct);
                 if (copyErr.Success && File.Exists(hostStderr))
                     stderr = (await File.ReadAllTextAsync(hostStderr, ct)).Trim();
+                else
+                    lost.Add($"stderr ({Reason(copyErr)})");
             }
             catch (Exception ex)
             {
                 _logger.LogDebug(ex, "Failed to retrieve stderr from guest");
+                lost.Add($"stderr ({ex.GetType().Name}: {ex.Message})");
             }
+
+            string? warning = lost.Count == 0 ? null :
+                $"The command ran (exit code {exitCode}) but its output could not be copied back from the guest: " +
+                string.Join("; ", lost) + ". The output above is incomplete or missing, not empty. If the command " +
+                "is safe to repeat, retry it; if VMware Tools was restarting, wait 10-30 s first.";
 
             // Cleanup host temp files
             SafeDeleteFile(hostBat);
@@ -123,7 +152,7 @@ public sealed class GuestExecManager
                 catch { }
             }, CancellationToken.None);
 
-            return GuestCommandResult.Ok(exitCode, stdout, stderr);
+            return GuestCommandResult.Ok(exitCode, stdout, stderr, warning);
         }
         catch (TimeoutException)
         {
@@ -159,20 +188,44 @@ public sealed class GuestExecManager
 
         var fileSize = new FileInfo(hostPath).Length;
 
+        string? shareError = null;
         if (fileSize >= LargeFileThreshold)
         {
-            var shareResult = await CopyToGuestViaShareAsync(hostPath, guestPath, fileSize, ct);
-            if (shareResult != null)
-                return shareResult;
-            _logger.LogWarning("Shared folder transfer failed, falling back to vmrun copyFile");
+            var (shareMessage, error) = await CopyToGuestViaShareAsync(hostPath, guestPath, fileSize, ct);
+            if (shareMessage != null)
+                return shareMessage;
+            shareError = error;
+            _logger.LogWarning("Shared folder transfer failed ({Error}), falling back to vmrun copyFile", error);
         }
 
-        var result = await _vmware.CopyFileToGuestAsync(hostPath, guestPath, ct);
-        if (!result.Success)
-            return $"File transfer failed: {result.Stderr}";
+        try
+        {
+            var result = await _vmware.CopyFileToGuestAsync(hostPath, guestPath, ct);
+            if (!result.Success)
+                return TransferFailure("vmrun copyFile: " + Reason(result), shareError);
+        }
+        catch (TimeoutException)
+        {
+            return TransferFailure(
+                $"vmrun copyFile timed out after {_config.Timeouts.GuestFileTransferSeconds}s (it moves roughly 2 MB/s)",
+                shareError);
+        }
 
         return $"Copied {hostPath} -> guest:{guestPath} ({fileSize:N0} bytes)";
     }
+
+    /// <summary>
+    /// Every failure names its cause. The shared-folder reason matters most: it is
+    /// the fast path for anything large, and when it fails the model has to know
+    /// whether the guest lacks the VMware Tools shared-folders feature, the VM
+    /// disallows shared folders, or the copy itself failed.
+    /// </summary>
+    private static string TransferFailure(string primary, string? shareError) =>
+        shareError == null
+            ? $"File transfer failed: {primary}."
+            : $"File transfer failed: {primary}. The shared-folder (HGFS) path was tried first and failed: " +
+              $"{shareError}. Shared folders need VMware Tools with the shared-folders feature installed in the " +
+              "guest and shared folders allowed for the VM.";
 
     /// <summary>
     /// Copy a file from the guest VM to the host.
@@ -190,16 +243,21 @@ public sealed class GuestExecManager
         if (!string.IsNullOrEmpty(hostDir) && !Directory.Exists(hostDir))
             Directory.CreateDirectory(hostDir);
 
-        var guestSize = await GetGuestFileSizeAsync(guestPath, ct);
+        var (guestSize, probeError) = await GetGuestFileSizeAsync(guestPath, ct);
         if (guestSize == null)
-            return $"Guest file not found: {guestPath}";
+            return probeError == null
+                ? $"Guest file not found: {guestPath}"
+                : $"Could not check the guest file {guestPath} before copying: {probeError}. " +
+                  "The guest may be halted, rebooting, or VMware Tools not responding; check get_system_state and retry.";
 
+        string? shareError = null;
         if (guestSize >= LargeFileThreshold)
         {
-            var shareFirst = await CopyFromGuestViaShareAsync(guestPath, hostPath, ct);
-            if (shareFirst != null)
-                return shareFirst;
-            _logger.LogWarning("Shared folder transfer failed, falling back to vmrun copyFile");
+            var (shareMessage, error) = await CopyFromGuestViaShareAsync(guestPath, hostPath, ct);
+            if (shareMessage != null)
+                return shareMessage;
+            shareError = error;
+            _logger.LogWarning("Shared folder transfer failed ({Error}), falling back to vmrun copyFile", error);
         }
 
         string failure;
@@ -208,33 +266,66 @@ public sealed class GuestExecManager
             var result = await _vmware.CopyFileFromGuestAsync(guestPath, hostPath, ct);
             if (result.Success && File.Exists(hostPath) && new FileInfo(hostPath).Length == guestSize)
                 return $"Copied guest:{guestPath} -> {hostPath} ({guestSize:N0} bytes)";
-            failure = result.Success ? "incomplete copy" : result.Stderr.Trim();
+            failure = result.Success ? "incomplete copy" : Reason(result);
         }
         catch (TimeoutException)
         {
-            failure = "vmrun copyFile timed out";
+            failure = $"vmrun copyFile timed out after {_config.Timeouts.GuestFileTransferSeconds}s (it moves roughly 2 MB/s)";
         }
         DeletePartialFile(hostPath);
 
-        _logger.LogWarning("vmrun copyFile failed ({Reason}), trying shared folder", failure);
-        var shareResult = await CopyFromGuestViaShareAsync(guestPath, hostPath, ct);
-        if (shareResult != null)
-            return shareResult;
+        // The shared folder is only retried if it was not already tried above.
+        if (shareError == null)
+        {
+            _logger.LogWarning("vmrun copyFile failed ({Reason}), trying shared folder", failure);
+            var (shareMessage, error) = await CopyFromGuestViaShareAsync(guestPath, hostPath, ct);
+            if (shareMessage != null)
+                return shareMessage;
+            shareError = error;
+        }
 
-        return $"File transfer failed: {failure}";
+        return TransferFailure(failure, shareError);
     }
 
-    /// <summary>Size of a guest file in bytes, or null if it does not exist.</summary>
-    private async Task<long?> GetGuestFileSizeAsync(string guestPath, CancellationToken ct)
+    /// <summary>
+    /// Size of a guest file in bytes. Size null with Error null means the file does
+    /// not exist; Error set means the probe itself could not run (guest unreachable).
+    /// </summary>
+    private async Task<(long? Size, string? Error)> GetGuestFileSizeAsync(string guestPath, CancellationToken ct)
     {
         // Runs inside a .bat (RunCommandAsync), hence %%I rather than %I.
-        var sizeResult = await RunCommandAsync(
-            $"for %%I in (\"{guestPath}\") do @echo %%~zI", timeoutSeconds: 30, ct: ct);
-        if (!sizeResult.Success || sizeResult.ExitCode != 0)
-            return null;
+        GuestCommandResult sizeResult;
+        try
+        {
+            sizeResult = await RunCommandAsync(
+                $"for %%I in (\"{guestPath}\") do @echo %%~zI", timeoutSeconds: 30, ct: ct);
+        }
+        catch (Exception ex)
+        {
+            return (null, $"{ex.GetType().Name}: {ex.Message}");
+        }
+        if (!sizeResult.Success)
+            return (null, sizeResult.ErrorMessage ?? "guest command did not run");
         var line = sizeResult.Stdout.Trim().Split('\n').LastOrDefault()?.Trim();
-        return long.TryParse(line, out var size) ? size : null;
+        if (long.TryParse(line, out var size))
+            return (size, null);
+        // "for" prints nothing for a missing file; an exit code with no number is the same thing.
+        return (null, null);
     }
+
+    private static readonly System.Text.RegularExpressions.Regex GuestExitRx =
+        new(@"non-zero exit code:\s*(-?\d+)", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+
+    /// <summary>True when vmrun ran the program and only reports its non-zero exit code.</summary>
+    internal static bool TryParseGuestExitCode(Vmware.ProcessResult r, out int exitCode)
+    {
+        var m = GuestExitRx.Match(r.Stdout + "\n" + r.Stderr);
+        exitCode = m.Success && int.TryParse(m.Groups[1].Value, out var n) ? n : 0;
+        return m.Success;
+    }
+
+    private static string Reason(Vmware.ProcessResult r) =>
+        string.IsNullOrWhiteSpace(r.Stderr) ? (string.IsNullOrWhiteSpace(r.Stdout) ? $"exit code {r.ExitCode}" : r.Stdout.Trim()) : r.Stderr.Trim();
 
     private void DeletePartialFile(string hostPath)
     {
@@ -247,7 +338,7 @@ public sealed class GuestExecManager
     /// Stages through an isolated temp directory so only the target file is exposed to the guest.
     /// Returns the success message, or null if shared folders aren't available.
     /// </summary>
-    private async Task<string?> CopyToGuestViaShareAsync(
+    private async Task<(string? Message, string? Error)> CopyToGuestViaShareAsync(
         string hostPath, string guestPath, long fileSize, CancellationToken ct)
     {
         var guid = Guid.NewGuid().ToString("N")[..8];
@@ -263,11 +354,11 @@ public sealed class GuestExecManager
 
             var enableResult = await _vmware.EnableSharedFoldersAsync(ct);
             if (!enableResult.Success)
-                return null;
+                return (null, "vmrun enableSharedFolders failed: " + Reason(enableResult));
 
             var addResult = await _vmware.AddSharedFolderAsync(shareName, stagingDir, ct);
             if (!addResult.Success)
-                return null;
+                return (null, "vmrun addSharedFolder failed: " + Reason(addResult));
 
             try
             {
@@ -281,12 +372,13 @@ public sealed class GuestExecManager
 
                 if (!copyResult.Success || copyResult.ExitCode != 0)
                 {
-                    _logger.LogWarning("Shared folder copy failed: {Err}",
-                        copyResult.Success ? copyResult.Stderr : copyResult.ErrorMessage);
-                    return null;
+                    var err = (copyResult.Success ? copyResult.Stderr : copyResult.ErrorMessage)?.Trim();
+                    _logger.LogWarning("Shared folder copy failed: {Err}", err);
+                    return (null, "the copy through \\\\vmware-host\\Shared Folders failed inside the guest " +
+                                  $"(exit {copyResult.ExitCode}): {err}");
                 }
 
-                return $"Copied {hostPath} -> guest:{guestPath} ({fileSize:N0} bytes) [via shared folder]";
+                return ($"Copied {hostPath} -> guest:{guestPath} ({fileSize:N0} bytes) [via shared folder]", null);
             }
             finally
             {
@@ -297,7 +389,7 @@ public sealed class GuestExecManager
         catch (Exception ex)
         {
             _logger.LogDebug(ex, "Shared folder transfer failed");
-            return null;
+            return (null, $"{ex.GetType().Name}: {ex.Message}");
         }
         finally
         {
@@ -311,7 +403,7 @@ public sealed class GuestExecManager
     /// Stages through an isolated temp directory so the guest can only write to that directory.
     /// Returns the success message, or null if shared folders aren't available.
     /// </summary>
-    private async Task<string?> CopyFromGuestViaShareAsync(
+    private async Task<(string? Message, string? Error)> CopyFromGuestViaShareAsync(
         string guestPath, string hostPath, CancellationToken ct)
     {
         var guid = Guid.NewGuid().ToString("N")[..8];
@@ -325,11 +417,11 @@ public sealed class GuestExecManager
 
             var enableResult = await _vmware.EnableSharedFoldersAsync(ct);
             if (!enableResult.Success)
-                return null;
+                return (null, "vmrun enableSharedFolders failed: " + Reason(enableResult));
 
             var addResult = await _vmware.AddSharedFolderAsync(shareName, stagingDir, ct);
             if (!addResult.Success)
-                return null;
+                return (null, "vmrun addSharedFolder failed: " + Reason(addResult));
 
             try
             {
@@ -339,14 +431,15 @@ public sealed class GuestExecManager
 
                 if (!copyResult.Success || copyResult.ExitCode != 0)
                 {
-                    _logger.LogWarning("Shared folder copy failed: {Err}",
-                        copyResult.Success ? copyResult.Stderr : copyResult.ErrorMessage);
-                    return null;
+                    var err = (copyResult.Success ? copyResult.Stderr : copyResult.ErrorMessage)?.Trim();
+                    _logger.LogWarning("Shared folder copy failed: {Err}", err);
+                    return (null, "the copy through \\\\vmware-host\\Shared Folders failed inside the guest " +
+                                  $"(exit {copyResult.ExitCode}): {err}");
                 }
 
                 var stagedFile = Path.Combine(stagingDir, fileName);
                 if (!File.Exists(stagedFile))
-                    return null;
+                    return (null, "the guest reported success but the file did not appear in the shared folder on the host");
 
                 var hostDir = Path.GetDirectoryName(hostPath);
                 if (!string.IsNullOrEmpty(hostDir) && !Directory.Exists(hostDir))
@@ -355,7 +448,7 @@ public sealed class GuestExecManager
                 File.Move(stagedFile, hostPath, overwrite: true);
 
                 var fileSize = new FileInfo(hostPath).Length;
-                return $"Copied guest:{guestPath} -> {hostPath} ({fileSize:N0} bytes) [via shared folder]";
+                return ($"Copied guest:{guestPath} -> {hostPath} ({fileSize:N0} bytes) [via shared folder]", null);
             }
             finally
             {
@@ -366,7 +459,7 @@ public sealed class GuestExecManager
         catch (Exception ex)
         {
             _logger.LogDebug(ex, "Shared folder transfer failed");
-            return null;
+            return (null, $"{ex.GetType().Name}: {ex.Message}");
         }
         finally
         {
@@ -382,7 +475,7 @@ public sealed class GuestExecManager
     {
         var result = await _vmware.ListProcessesInGuestAsync(ct);
         if (!result.Success)
-            return $"Failed to list processes: {result.Stderr}";
+            return $"Failed to list processes: {Reason(result)}";
 
         return result.Stdout;
     }
@@ -394,7 +487,7 @@ public sealed class GuestExecManager
     {
         var result = await _vmware.KillProcessInGuestAsync(pid, ct);
         if (!result.Success)
-            return $"Failed to kill process {pid}: {result.Stderr}";
+            return $"Failed to kill process {pid}: {Reason(result)}";
 
         return $"Process {pid} killed successfully.";
     }

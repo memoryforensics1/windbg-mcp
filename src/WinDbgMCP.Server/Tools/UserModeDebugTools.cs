@@ -17,34 +17,34 @@ public static class UserModeDebugTools
         "Requires: frida-tools installed on host (pip install frida-tools), " +
         "frida-server.exe running in the guest VM. " +
         "After attaching, use umd_frida to inject scripts, hook functions, etc.")]
-    public static async Task<string> UmdFridaAttach(
+    public static Task<string> UmdFridaAttach(
         StateCoordinator state,
         FridaManager frida,
         [Description("Process name to attach to (e.g., 'notepad.exe'). Mutually exclusive with pid.")] string? processName = null,
         [Description("Process ID to attach to. Mutually exclusive with processName.")] int? pid = null,
         CancellationToken ct = default)
     {
-        var precheck = await state.ValidatePreconditionsAsync("umd_frida_attach");
-        if (precheck != null) return precheck.ErrorMessage!;
+        return state.RunToolAsync("umd_frida_attach", async () =>
+        {
+            if (processName == null && pid == null)
+                return "Provide either processName or pid to attach to.";
 
-        if (processName == null && pid == null)
-            return "Provide either processName or pid to attach to.";
-
-        try
-        {
-            if (pid.HasValue)
-                return await frida.AttachAsync(pid.Value, ct);
-            else
-                return await frida.AttachByNameAsync(processName!, ct);
-        }
-        catch (OperationCanceledException)
-        {
-            return "umd_frida_attach timed out. Is frida-server running in the guest?";
-        }
-        catch (Exception ex)
-        {
-            return $"umd_frida_attach failed: {ex.GetType().Name}: {ex.Message}";
-        }
+            try
+            {
+                if (pid.HasValue)
+                    return await frida.AttachAsync(pid.Value, ct);
+                else
+                    return await frida.AttachByNameAsync(processName!, ct);
+            }
+            catch (OperationCanceledException)
+            {
+                return "umd_frida_attach timed out. Is frida-server running in the guest?";
+            }
+            catch (Exception ex)
+            {
+                return $"umd_frida_attach failed: {ex.GetType().Name}: {ex.Message}";
+            }
+        });
     }
 
     [McpServerTool(Name = "umd_frida"), Description(
@@ -54,7 +54,7 @@ public static class UserModeDebugTools
         "'inject_bg' (start persistent background hook session), " +
         "'collect_bg' (read output from background session), " +
         "'stop_bg' (stop background session).")]
-    public static async Task<string> UmdFrida(
+    public static Task<string> UmdFrida(
         StateCoordinator state,
         FridaManager frida,
         [Description("Action: 'inject', 'eval', 'list', 'detach', 'inject_bg', 'collect_bg', 'stop_bg'")] string action,
@@ -65,52 +65,54 @@ public static class UserModeDebugTools
                      "multiple umd_frida calls. Default false.")] bool eternalize = false,
         CancellationToken ct = default)
     {
-        var precheck = await state.ValidatePreconditionsAsync("umd_frida");
-        if (precheck != null) return precheck.ErrorMessage!;
-
-        try
+        return state.RunToolAsync("umd_frida", async () =>
         {
-            return action.ToLowerInvariant() switch
+            try
             {
-                "inject" => code == null
-                    ? "Provide 'code' parameter with JavaScript to inject."
-                    : await frida.InjectScriptAsync(code, timeoutSeconds, eternalize, ct),
+                return action.ToLowerInvariant() switch
+                {
+                    "inject" => code == null
+                        ? "Provide 'code' parameter with JavaScript to inject."
+                        : await frida.InjectScriptAsync(code, timeoutSeconds, eternalize, ct),
 
-                "eval" => code == null
-                    ? "Provide 'code' parameter with JavaScript expression to evaluate."
-                    : await frida.EvalAsync(code, timeoutSeconds, ct),
+                    "eval" => code == null
+                        ? "Provide 'code' parameter with JavaScript expression to evaluate."
+                        : await frida.EvalAsync(code, timeoutSeconds, ct),
 
-                "list" => await frida.ListProcessesAsync(ct),
+                    "list" => await frida.ListProcessesAsync(ct),
 
-                "detach" => frida.Detach(),
+                    "detach" => frida.Detach(),
 
-                "inject_bg" => code == null
-                    ? "Provide 'code' parameter with JavaScript to inject in background."
-                    : await frida.InjectBackgroundAsync(code, ct),
+                    "inject_bg" => code == null
+                        ? "Provide 'code' parameter with JavaScript to inject in background."
+                        : await frida.InjectBackgroundAsync(code, ct),
 
-                "collect_bg" => frida.CollectBackgroundOutput(),
+                    "collect_bg" => frida.CollectBackgroundOutput(),
 
-                "stop_bg" => frida.StopBackgroundSession(),
+                    "stop_bg" => frida.StopBackgroundSession(),
 
-                _ => $"Unknown action '{action}'. Use: inject, eval, list, detach, inject_bg, collect_bg, stop_bg."
-            };
-        }
-        catch (OperationCanceledException)
-        {
-            return "umd_frida timed out.";
-        }
-        catch (Exception ex)
-        {
-            return $"umd_frida failed: {ex.GetType().Name}: {ex.Message}";
-        }
+                    _ => $"Unknown action '{action}'. Use: inject, eval, list, detach, inject_bg, collect_bg, stop_bg."
+                };
+            }
+            catch (OperationCanceledException)
+            {
+                return "umd_frida timed out: the frida process in the guest did not answer. The guest may be halted by the " +
+                       "kernel debugger or rebooting (check get_system_state), or the script is blocking. Retry once the " +
+                       "guest is running.";
+            }
+            catch (Exception ex)
+            {
+                return $"umd_frida failed: {ex.GetType().Name}: {ex.Message}";
+            }
+        });
     }
 
     [McpServerTool(Name = "umd_frida_skill"), Description(
         "Get Frida best practices, API reference, and usage patterns for the MCP Frida tools. " +
         "Call this BEFORE using Frida if you are unfamiliar with the workflow.")]
-    public static string UmdFridaSkill()
+    public static Task<string> UmdFridaSkill(StateCoordinator state)
     {
-        return """
+        return state.RunToolAsync("umd_frida_skill", () => Task.FromResult("""
             ╔══════════════════════════════════════════════════════════════╗
             ║              FRIDA MCP TOOLS — QUICK REFERENCE             ║
             ╚══════════════════════════════════════════════════════════════╝
@@ -265,7 +267,7 @@ public static class UserModeDebugTools
             Attach fails with "unable to find process":
               → Use umd_frida(action="list") to see exact process names
               → Process names are case-sensitive
-            """;
+            """));
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -275,9 +277,9 @@ public static class UserModeDebugTools
     [McpServerTool(Name = "umd_dbgsrv_skill"), Description(
         "Get dbgsrv best practices, WinDbg command reference, and usage patterns " +
         "for the MCP dbgsrv tools. Call this BEFORE using dbgsrv if you are unfamiliar with the workflow.")]
-    public static string UmdDbgsrvSkill()
+    public static Task<string> UmdDbgsrvSkill(StateCoordinator state)
     {
-        return """
+        return state.RunToolAsync("umd_dbgsrv_skill", () => Task.FromResult("""
             ╔══════════════════════════════════════════════════════════════╗
             ║            DBGSRV MCP TOOLS — QUICK REFERENCE              ║
             ╚══════════════════════════════════════════════════════════════╝
@@ -454,7 +456,7 @@ public static class UserModeDebugTools
             • Symbols may show (deferred) — run .reload /f to load them.
             • Works simultaneously with kernel debugging (kd_*) —
               no conflicts, completely independent.
-            """;
+            """));
     }
 
     [McpServerTool(Name = "umd_dbgsrv_connect"), Description(
@@ -463,36 +465,36 @@ public static class UserModeDebugTools
         "and cdb.exe installed on the host (Windows SDK Debuggers). " +
         "Uses cdb.exe externally — fully independent from kernel debugging. " +
         "Both kernel debug and user-mode debug can be active simultaneously.")]
-    public static async Task<string> UmdDbgsrvConnect(
+    public static Task<string> UmdDbgsrvConnect(
         StateCoordinator state,
         DbgsrvManager dbgsrv,
         [Description("Guest VM IP address")] string vmIpAddress,
         [Description("dbgsrv TCP port (default 5064)")] int port = 5064,
         CancellationToken ct = default)
     {
-        var precheck = await state.ValidatePreconditionsAsync("umd_dbgsrv_connect");
-        if (precheck != null) return precheck.ErrorMessage!;
-
-        try
+        return state.RunToolAsync("umd_dbgsrv_connect", async () =>
         {
-            return await dbgsrv.ConnectAsync(vmIpAddress, port, ct);
-        }
-        catch (OperationCanceledException)
-        {
-            return "umd_dbgsrv_connect timed out. Is dbgsrv.exe running in the guest? " +
-                   "Start it: guest_run_command(\"start /b C:\\Tools\\DbgSrv\\dbgsrv.exe -t tcp:port=5064\")";
-        }
-        catch (Exception ex)
-        {
-            return $"umd_dbgsrv_connect failed: {ex.GetType().Name}: {ex.Message}";
-        }
+            try
+            {
+                return await dbgsrv.ConnectAsync(vmIpAddress, port, ct);
+            }
+            catch (OperationCanceledException)
+            {
+                return "umd_dbgsrv_connect timed out. Is dbgsrv.exe running in the guest? " +
+                       "Start it: guest_run_command(\"start /b C:\\Tools\\DbgSrv\\dbgsrv.exe -t tcp:port=5064\")";
+            }
+            catch (Exception ex)
+            {
+                return $"umd_dbgsrv_connect failed: {ex.GetType().Name}: {ex.Message}";
+            }
+        });
     }
 
     [McpServerTool(Name = "umd_dbgsrv_execute"), Description(
         "Execute operations via the dbgsrv remote user-mode debug connection. " +
         "Actions: 'attach' (attach to PID), 'command' (run WinDbg command), " +
         "'detach', 'disconnect'.")]
-    public static async Task<string> UmdDbgsrvExecute(
+    public static Task<string> UmdDbgsrvExecute(
         StateCoordinator state,
         DbgsrvManager dbgsrv,
         [Description("Action: 'attach', 'command', 'detach', 'disconnect'")] string action,
@@ -500,37 +502,38 @@ public static class UserModeDebugTools
         [Description("Timeout in seconds (default 30)")] int timeoutSeconds = 30,
         CancellationToken ct = default)
     {
-        var precheck = await state.ValidatePreconditionsAsync("umd_dbgsrv_execute");
-        if (precheck != null) return precheck.ErrorMessage!;
-
-        try
+        return state.RunToolAsync("umd_dbgsrv_execute", async () =>
         {
-            return action.ToLowerInvariant() switch
+            try
             {
-                "attach" => argument == null || !uint.TryParse(argument, out var pid)
-                    ? "Provide 'argument' with the PID to attach to."
-                    : await dbgsrv.AttachToProcessAsync(pid),
+                return action.ToLowerInvariant() switch
+                {
+                    "attach" => argument == null || !uint.TryParse(argument, out var pid)
+                        ? "Provide 'argument' with the PID to attach to."
+                        : await dbgsrv.AttachToProcessAsync(pid),
 
-                "command" => argument == null
-                    ? "Provide 'argument' with the WinDbg command to execute."
-                    : await dbgsrv.ExecuteCommandAsync(argument, timeoutSeconds),
+                    "command" => argument == null
+                        ? "Provide 'argument' with the WinDbg command to execute."
+                        : await dbgsrv.ExecuteCommandAsync(argument, timeoutSeconds),
 
-                "detach" => await dbgsrv.DetachAsync(),
+                    "detach" => await dbgsrv.DetachAsync(),
 
-                "disconnect" => await dbgsrv.DisconnectAsync(),
+                    "disconnect" => await dbgsrv.DisconnectAsync(),
 
-                _ => $"Unknown action '{action}'. Use: attach, command, detach, disconnect."
-            };
-        }
-        catch (OperationCanceledException)
-        {
-            return $"umd_dbgsrv_execute '{action}' timed out. The DbgEng thread may be busy. " +
-                   "Try again, or disconnect and reconnect.";
-        }
-        catch (Exception ex)
-        {
-            return $"umd_dbgsrv_execute '{action}' failed: {ex.GetType().Name}: {ex.Message}";
-        }
+                    _ => $"Unknown action '{action}'. Use: attach, command, detach, disconnect."
+                };
+            }
+            catch (OperationCanceledException)
+            {
+                return $"umd_dbgsrv_execute '{action}' timed out. dbgsrv runs inside the guest, so this usually means the " +
+                       "guest is not responding: halted by the kernel debugger (check get_system_state; kd_continue), " +
+                       "rebooting, or dbgsrv.exe died. Retry once the guest is running; disconnect and reconnect if it persists.";
+            }
+            catch (Exception ex)
+            {
+                return $"umd_dbgsrv_execute '{action}' failed: {ex.GetType().Name}: {ex.Message}";
+            }
+        });
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -543,7 +546,7 @@ public static class UserModeDebugTools
         "'record_attach' (attach TTD to running PID), 'stop' (stop recording), " +
         "'retrieve' (copy trace to host), 'list' (list trace files). " +
         "Requires: TTD.exe installed in guest (C:\\Tools\\TTD\\TTD.exe).")]
-    public static async Task<string> UmdTtd(
+    public static Task<string> UmdTtd(
         StateCoordinator state,
         TtdManager ttd,
         [Description("Action: 'record_launch', 'record_attach', 'stop', 'retrieve', 'list'")] string action,
@@ -555,40 +558,42 @@ public static class UserModeDebugTools
         [Description("Timeout in seconds (default 300 for recordings)")] int timeoutSeconds = 300,
         CancellationToken ct = default)
     {
-        var precheck = await state.ValidatePreconditionsAsync("umd_ttd");
-        if (precheck != null) return precheck.ErrorMessage!;
-
-        try
+        return state.RunToolAsync("umd_ttd", async () =>
         {
-            return action.ToLowerInvariant() switch
+            try
             {
-                "record_launch" => target == null
-                    ? "Provide 'target' with the executable path in the guest."
-                    : await ttd.RecordLaunchAsync(target, arguments ?? "", timeoutSeconds: timeoutSeconds, ct: ct),
+                return action.ToLowerInvariant() switch
+                {
+                    "record_launch" => target == null
+                        ? "Provide 'target' with the executable path in the guest."
+                        : await ttd.RecordLaunchAsync(target, arguments ?? "", timeoutSeconds: timeoutSeconds, ct: ct),
 
-                "record_attach" => target == null || !uint.TryParse(target, out var pid)
-                    ? "Provide 'target' with the PID to record."
-                    : await ttd.RecordAttachAsync(pid, timeoutSeconds: timeoutSeconds, ct: ct),
+                    "record_attach" => target == null || !uint.TryParse(target, out var pid)
+                        ? "Provide 'target' with the PID to record."
+                        : await ttd.RecordAttachAsync(pid, timeoutSeconds: timeoutSeconds, ct: ct),
 
-                "stop" => await ttd.StopRecordingAsync(ct),
+                    "stop" => await ttd.StopRecordingAsync(ct),
 
-                "retrieve" => target == null || outputPath == null
-                    ? "Provide 'target' (guest trace path) and 'outputPath' (host path)."
-                    : await ttd.RetrieveTraceAsync(target, outputPath, ct),
+                    "retrieve" => target == null || outputPath == null
+                        ? "Provide 'target' (guest trace path) and 'outputPath' (host path)."
+                        : await ttd.RetrieveTraceAsync(target, outputPath, ct),
 
-                "list" => await ttd.ListTracesAsync(ct: ct),
+                    "list" => await ttd.ListTracesAsync(ct: ct),
 
-                _ => $"Unknown action '{action}'. Use: record_launch, record_attach, stop, retrieve, list."
-            };
-        }
-        catch (OperationCanceledException)
-        {
-            return "umd_ttd timed out.";
-        }
-        catch (Exception ex)
-        {
-            return $"umd_ttd failed: {ex.GetType().Name}: {ex.Message}";
-        }
+                    _ => $"Unknown action '{action}'. Use: record_launch, record_attach, stop, retrieve, list."
+                };
+            }
+            catch (OperationCanceledException)
+            {
+                return "umd_ttd timed out: the TTD recorder in the guest did not answer. The guest may be halted by the " +
+                       "kernel debugger or rebooting (check get_system_state), or the recording is still being written. " +
+                       "Retry once the guest is running.";
+            }
+            catch (Exception ex)
+            {
+                return $"umd_ttd failed: {ex.GetType().Name}: {ex.Message}";
+            }
+        });
     }
 
     [McpServerTool(Name = "umd_ttd_query"), Description(
@@ -596,13 +601,14 @@ public static class UserModeDebugTools
         "The trace must first be retrieved from the guest via umd_ttd(action='retrieve'). " +
         "NOTE: This tool is not yet implemented — use WinDbg Preview to open .run files.")]
     public static Task<string> UmdTtdQuery(
+        StateCoordinator state,
         [Description("Path to the .run trace file on the host")] string tracePath,
         [Description("TTD query (e.g., 'dx @$cursession.TTD.Calls(\"kernel32!CreateFileW\")')")] string query)
     {
         // TTD query via DbgEng requires opening the trace as a dump target
         // in a separate DbgEng session. This is complex to implement and is
         // deferred to a later phase. For now, suggest using WinDbg Preview.
-        return Task.FromResult(
+        return state.RunToolAsync("umd_ttd_query", () => Task.FromResult(
             "umd_ttd_query is not yet implemented. To analyze TTD traces:\n" +
             $"1. Open the trace in WinDbg Preview: File > Open Trace > {tracePath}\n" +
             "2. Run TTD queries like:\n" +
@@ -610,6 +616,6 @@ public static class UserModeDebugTools
             "   dx @$cursession.TTD.Memory(0x12345, 0x12345+4, \"w\")\n" +
             "   !tt 0:0  (go to start of trace)\n" +
             "   !tt 100  (go to end of trace)\n" +
-            "This feature will be implemented in a future update.");
+            "This feature will be implemented in a future update."));
     }
 }
