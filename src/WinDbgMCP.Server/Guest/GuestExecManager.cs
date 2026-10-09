@@ -68,7 +68,7 @@ public sealed class GuestExecManager
             var copyBat = await _vmware.CopyFileToGuestAsync(hostBat, guestBat, ct);
             if (!copyBat.Success)
                 return GuestCommandResult.Failed(
-                    $"Failed to copy command script to guest: {copyBat.Stderr.Trim()}");
+                    $"Failed to copy command script to guest: {Reason(copyBat)}");
 
             // Execute the batch file in the guest
             var execResult = await _vmware.RunProgramInGuestAsync(
@@ -77,21 +77,42 @@ public sealed class GuestExecManager
                 timeout: timeout,
                 ct: ct);
 
-            var exitCode = execResult.ExitCode;
+            // vmrun exits non-zero both when the guest program did (it then prints
+            // "Guest program exited with non-zero exit code: N") and when vmrun
+            // itself failed (e.g. "Error: VMware Tools are not running in the guest").
+            // Only the first is a command result; the second means it never ran.
+            int exitCode;
+            if (execResult.Success)
+                exitCode = 0;
+            else if (TryParseGuestExitCode(execResult, out var guestExit))
+                exitCode = guestExit;
+            else
+            {
+                SafeDeleteFile(hostBat);
+                return GuestCommandResult.Failed(
+                    $"The command could not be run in the guest: {Reason(execResult)}. " +
+                    "If VMware Tools is restarting or the guest is busy (e.g. right after boot, a resume or a " +
+                    "debugger detach), wait 10-30 s and retry; get_system_state shows whether guest operations are available.");
+            }
 
-            // Copy stdout/stderr files from guest to host
+            // Copy stdout/stderr files from guest to host. A failed copy is reported:
+            // an empty result must mean "no output", never "output lost".
             string stdout = "";
             string stderr = "";
+            var lost = new List<string>();
 
             try
             {
                 var copyOut = await _vmware.CopyFileFromGuestAsync(guestStdout, hostStdout, ct);
                 if (copyOut.Success && File.Exists(hostStdout))
                     stdout = (await File.ReadAllTextAsync(hostStdout, ct)).Trim();
+                else
+                    lost.Add($"stdout ({Reason(copyOut)})");
             }
             catch (Exception ex)
             {
                 _logger.LogDebug(ex, "Failed to retrieve stdout from guest");
+                lost.Add($"stdout ({ex.GetType().Name}: {ex.Message})");
             }
 
             try
@@ -99,11 +120,19 @@ public sealed class GuestExecManager
                 var copyErr = await _vmware.CopyFileFromGuestAsync(guestStderr, hostStderr, ct);
                 if (copyErr.Success && File.Exists(hostStderr))
                     stderr = (await File.ReadAllTextAsync(hostStderr, ct)).Trim();
+                else
+                    lost.Add($"stderr ({Reason(copyErr)})");
             }
             catch (Exception ex)
             {
                 _logger.LogDebug(ex, "Failed to retrieve stderr from guest");
+                lost.Add($"stderr ({ex.GetType().Name}: {ex.Message})");
             }
+
+            string? warning = lost.Count == 0 ? null :
+                $"The command ran (exit code {exitCode}) but its output could not be copied back from the guest: " +
+                string.Join("; ", lost) + ". The output above is incomplete or missing, not empty. If the command " +
+                "is safe to repeat, retry it; if VMware Tools was restarting, wait 10-30 s first.";
 
             // Cleanup host temp files
             SafeDeleteFile(hostBat);
@@ -123,7 +152,7 @@ public sealed class GuestExecManager
                 catch { }
             }, CancellationToken.None);
 
-            return GuestCommandResult.Ok(exitCode, stdout, stderr);
+            return GuestCommandResult.Ok(exitCode, stdout, stderr, warning);
         }
         catch (TimeoutException)
         {
@@ -173,7 +202,7 @@ public sealed class GuestExecManager
         {
             var result = await _vmware.CopyFileToGuestAsync(hostPath, guestPath, ct);
             if (!result.Success)
-                return TransferFailure("vmrun copyFile: " + result.Stderr.Trim(), shareError);
+                return TransferFailure("vmrun copyFile: " + Reason(result), shareError);
         }
         catch (TimeoutException)
         {
@@ -237,7 +266,7 @@ public sealed class GuestExecManager
             var result = await _vmware.CopyFileFromGuestAsync(guestPath, hostPath, ct);
             if (result.Success && File.Exists(hostPath) && new FileInfo(hostPath).Length == guestSize)
                 return $"Copied guest:{guestPath} -> {hostPath} ({guestSize:N0} bytes)";
-            failure = result.Success ? "incomplete copy" : result.Stderr.Trim();
+            failure = result.Success ? "incomplete copy" : Reason(result);
         }
         catch (TimeoutException)
         {
@@ -282,6 +311,17 @@ public sealed class GuestExecManager
             return (size, null);
         // "for" prints nothing for a missing file; an exit code with no number is the same thing.
         return (null, null);
+    }
+
+    private static readonly System.Text.RegularExpressions.Regex GuestExitRx =
+        new(@"non-zero exit code:\s*(-?\d+)", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+
+    /// <summary>True when vmrun ran the program and only reports its non-zero exit code.</summary>
+    internal static bool TryParseGuestExitCode(Vmware.ProcessResult r, out int exitCode)
+    {
+        var m = GuestExitRx.Match(r.Stdout + "\n" + r.Stderr);
+        exitCode = m.Success && int.TryParse(m.Groups[1].Value, out var n) ? n : 0;
+        return m.Success;
     }
 
     private static string Reason(Vmware.ProcessResult r) =>
@@ -435,7 +475,7 @@ public sealed class GuestExecManager
     {
         var result = await _vmware.ListProcessesInGuestAsync(ct);
         if (!result.Success)
-            return $"Failed to list processes: {result.Stderr}";
+            return $"Failed to list processes: {Reason(result)}";
 
         return result.Stdout;
     }
@@ -447,7 +487,7 @@ public sealed class GuestExecManager
     {
         var result = await _vmware.KillProcessInGuestAsync(pid, ct);
         if (!result.Success)
-            return $"Failed to kill process {pid}: {result.Stderr}";
+            return $"Failed to kill process {pid}: {Reason(result)}";
 
         return $"Process {pid} killed successfully.";
     }
