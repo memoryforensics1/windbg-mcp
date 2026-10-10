@@ -28,6 +28,14 @@ public sealed class VmwareManager
     // for the same VM. Concurrent calls can corrupt internal state and cause timeouts.
     private readonly SemaphoreSlim _vmrunLock = new(1, 1);
 
+    // EXTERNAL-TARGET mode: when vmrun.exe is not present we cannot manage a local
+    // VMware VM, but kernel debugging over KDNET to a physical / externally-managed
+    // target still works. In that mode VM/guest tools are disabled and the target is
+    // treated as "always running" so kd_connect is not gated on a VMware power state.
+    private readonly bool _available;
+
+    public bool Available => _available;
+
     public string VmxPath => _vmxPath;
     public string GuestUser => _guestUser;
 
@@ -42,13 +50,15 @@ public sealed class VmwareManager
         _security = config.Security;
         _logger = logger;
 
-        // Validate vmrun exists at startup
-        if (!File.Exists(_vmrunPath))
+        // Do NOT throw when vmrun is missing — that would break EVERY tool (VmwareManager
+        // is a dependency of StateCoordinator, which every tool resolves). Instead fall back
+        // to EXTERNAL-TARGET mode so kernel debugging over KDNET still works.
+        _available = File.Exists(_vmrunPath);
+        if (!_available)
         {
-            throw new FileNotFoundException(
-                $"vmrun not found at '{_vmrunPath}'. " +
-                "Install VMware Workstation Pro and verify the vmrunPath in appsettings.json.",
-                _vmrunPath);
+            _logger.LogWarning(
+                "vmrun not found at '{Path}'. Running in EXTERNAL-TARGET mode: VM and guest " +
+                "tools are disabled; kernel debugging over KDNET only.", _vmrunPath);
         }
     }
 
@@ -226,6 +236,11 @@ public sealed class VmwareManager
 
     public async Task<VmPowerState> GetPowerStateAsync(CancellationToken ct = default)
     {
+        // External-target mode: no vmrun to query. Treat the KDNET target as running so
+        // kd_connect's "VM must be running" precondition is satisfied.
+        if (!_available)
+            return VmPowerState.Running;
+
         try
         {
             // vmrun list returns all running VMs
@@ -259,6 +274,10 @@ public sealed class VmwareManager
 
     public async Task<bool> AreToolsRunningAsync(TimeSpan? timeout = null, CancellationToken ct = default)
     {
+        // External-target mode: no VMware Tools. Guest ops go through other channels (e.g. SSH).
+        if (!_available)
+            return false;
+
         // vmrun checkToolsState returns "running", "installed", or "unknown"
         // This can HANG if the guest is kernel-broken, so we use a short timeout.
         timeout ??= TimeSpan.FromSeconds(_timeouts.VmToolsCheckSeconds);
