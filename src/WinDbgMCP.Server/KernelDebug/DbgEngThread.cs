@@ -27,6 +27,14 @@ public sealed class DbgEngThread : IDisposable
     public volatile bool PumpEnabled;
 
     /// <summary>
+    /// A tool call is queued and waiting for the engine thread. The pump is parked
+    /// in an INFINITE WaitForEvent; it only needs to break the target (which halts
+    /// the guest for ~200 ms) when there is actually work to run. While this is
+    /// false the target runs free, so guest/VM operations are not disturbed.
+    /// </summary>
+    public bool HasPendingWork => _workQueue.Count > 0;
+
+    /// <summary>
     /// The work item currently executing on the engine thread, if any. A tool
     /// whose item timed out while *running* keeps running here (dbgeng cannot
     /// cancel a command); later items wait behind it and are told so.

@@ -36,6 +36,11 @@ public sealed class DbgEngManager : IDisposable
     // and with a one-shot timer WaitForEvent(INFINITE) would then never return.
     private const int InterruptRetryMs = 2000;
     private const int PumpYieldMs = 5000;
+    // How often the idle pump checks whether a tool call is waiting. It only
+    // breaks the target when one is (see PumpEvents), so a short interval just
+    // means queued kernel commands are serviced promptly; it does NOT halt a
+    // freely-running target, so guest/VM operations are left undisturbed.
+    private const int PumpPollMs = 1000;
 
     // E_PENDING: WaitForEvent returned because of SetInterrupt(DEBUG_INTERRUPT_EXIT)
     private static readonly HRESULT WaitExited = (HRESULT)0x8000000AU;
@@ -854,12 +859,21 @@ public sealed class DbgEngManager : IDisposable
             return;
         }
 
-        // Live kernel targets only support INFINITE waits. A periodic ACTIVE
-        // break-in yields the thread every few seconds so queued tool calls run
-        // (no-op while the engine has no debuggee: an interrupt during the KDNET
-        // reconnect handshake makes the kernel retry it). If the target never
-        // comes back this wait cannot be woken; see ReplaceEngineThread.
-        using var interruptTimer = new Timer(_ => RequestInterrupt(), null, PumpYieldMs, PumpYieldMs);
+        // Live kernel targets only support INFINITE waits. To run a queued tool
+        // call the engine thread must leave this wait, and the only thing that
+        // wakes it is an ACTIVE break-in. We send one ONLY while a tool call is
+        // actually queued (retried each tick, because a request sent to a busy
+        // kernel is dropped). While nothing is queued the target runs free: a real
+        // event (breakpoint, bugcheck, the guest's own int 3) still returns the
+        // wait on its own, and the guest is not halted every few seconds — that
+        // periodic halt used to race with VMware Tools starting a program and made
+        // guest operations fail intermittently while the debugger was attached.
+        // (A break-in is a no-op while the engine has no debuggee; an interrupt
+        // during the KDNET reconnect handshake makes the kernel retry it.) If the
+        // target never comes back this wait cannot be woken; see ReplaceEngineThread.
+        using var interruptTimer = new Timer(
+            _ => { if (_thread.HasPendingWork) RequestInterrupt(); },
+            null, PumpPollMs, PumpPollMs);
 
         var hr = _client.Control.TryWaitForEvent(DEBUG_WAIT.DEFAULT, unchecked((int)0xFFFFFFFF));
         _logger.LogInformation("Pump: WaitForEvent returned {Hr}, status={Status}", hr, _eventCallbacks.LastExecutionStatus);
