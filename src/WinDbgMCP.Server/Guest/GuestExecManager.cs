@@ -89,8 +89,22 @@ public sealed class GuestExecManager
             else
             {
                 SafeDeleteFile(hostBat);
+                var reason = Reason(execResult);
+                // We just copied the batch file into the guest, so VMware Tools is
+                // responsive. If the program still would not START (VIX "A program
+                // could not run ..."), the guest itself refused to create the
+                // process — Tools is up and the MCP transport is fine. Say so, so
+                // this is not misread as a stale connection that a restart fixes.
+                if (reason.IndexOf("could not run", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    reason.IndexOf("program not started", StringComparison.OrdinalIgnoreCase) >= 0)
+                    return GuestCommandResult.Failed(
+                        $"The guest refused to start the program: {reason}. " +
+                        "VMware Tools is responsive — copying the command script into the guest just succeeded — so this is " +
+                        "a guest-side condition, not a stale MCP connection, and restarting the MCP server will not change it. " +
+                        "Usual causes: the guest is still settling after a reboot or a resume (wait 20-60 s and retry), or a " +
+                        "security product in the guest is blocking process creation. get_system_state shows VM power, Tools and KD state.");
                 return GuestCommandResult.Failed(
-                    $"The command could not be run in the guest: {Reason(execResult)}. " +
+                    $"The command could not be run in the guest: {reason}. " +
                     "If VMware Tools is restarting or the guest is busy (e.g. right after boot, a resume or a " +
                     "debugger detach), wait 10-30 s and retry; get_system_state shows whether guest operations are available.");
             }
